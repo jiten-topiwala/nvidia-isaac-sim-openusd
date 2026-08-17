@@ -1,0 +1,52 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.2.0"
+    }
+    defaultPrim = "Market_M1"
+    doc = """Generated from Composed Stage of root layer /tmp/tmp6iod6h4g/Market_M1.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_market_world_m1_h9m54bwk/usdex_market_world_m1/Market_M1.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_market_world_m1_h9m54bwk/temp_market_world_m1/market_world_m1.usd
+
+
+Generated from Composed Stage of root layer /home/aman/aman_files/motion-planning/isaac_sim/usd/market_world_m1/payloads/base.usd
+"""
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Market_M1" (
+    prepend references = @./payloads/base.usda@
+    variants = {
+        string Physics = "physx"
+    }
+    append variantSets = "Physics"
+)
+{
+    variantSet "Physics" = {
+        "mujoco" (
+            prepend payload = @./payloads/Physics/mujoco.usda@
+        ) {
+
+        }
+        "none" {
+
+        }
+        "physics" (
+            prepend payload = @./payloads/Physics/physics.usda@
+        ) {
+
+        }
+        "physx" (
+            prepend payload = @./payloads/Physics/physx.usda@
+        ) {
+
+        }
+    }
+}
+
