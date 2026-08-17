@@ -1,1 +1,0 @@
-nvidia-isaac-sim-openusd
