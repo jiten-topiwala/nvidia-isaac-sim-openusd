@@ -12,6 +12,10 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-Ubuntu%2022.04-E95420?logo=ubuntu&logoColor=white">
 </p>
 
+<p align="center">
+  <img alt="MORPH-I loaded in Isaac Sim" src="media/robot_with_gui.jpeg" width="900">
+</p>
+
 ---
 
 ## Scope
@@ -25,6 +29,16 @@ to an OpenUSD package that loads, renders and simulates correctly in Isaac Sim.
 | Racks, shelves, textured products, marble floor | Arm motion, IK, trajectories |
 | 98-DOF robot articulation, parked and every joint controllable | Grasping, lifting, placing |
 | Converter-damage fixups applied at load | Physics tuning for manipulation |
+
+---
+
+## Preview
+
+<p align="center">
+  <img alt="MORPH-I robot in Isaac Sim" src="media/robot1.jpeg" width="45%">
+  &nbsp;
+  <img alt="MORPH-I robot — alternate angle" src="media/robot2.jpeg" width="45%">
+</p>
 
 ---
 
