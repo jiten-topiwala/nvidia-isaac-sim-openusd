@@ -1,0 +1,11 @@
+# Dependencies for the OMPL planner interpreter only (see OMPL_PYTHON in the README).
+#
+# play_isaac.py and scene.py run inside Isaac Sim's own bundled Python, which already
+# ships numpy, pxr (OpenUSD), omni.ui and the isaacsim packages — nothing to install there.
+#
+# nav_plan.py runs as a subprocess in a separate Python 3.10 environment, because
+# Isaac's interpreter has no OMPL bindings. That environment needs:
+
+# OMPL wheels are built against the NumPy 1.x ABI, so keep NumPy on 1.26.
+numpy==1.26.4
+ompl==2.0.0

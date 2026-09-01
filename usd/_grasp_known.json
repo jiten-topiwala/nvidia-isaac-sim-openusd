@@ -1,0 +1,54 @@
+{
+ "_comment": "Known-good single-object side-grip grasp, dumped from a real successful MuJoCo grasp cycle. Isaac replays it deterministically: set base -> force ALL these arm-1 joints (incl passive linkage) -> object sits at object_xyz -> close. No IK, no LUT. 2026-07-23b: box-clearing grasp WITHIN joint limits \u2014 columns h1 0.285/dh 0.11, boom a1 0.44, HandBearing re-tuned (orientation diff 0.001, finger cage shift <0.2mm, palm z exact). Carriages 0.651/0.761 > chassis-box top 0.635; ArmRight -0.489 vs limit -0.525 (first attempt used a1 0.597 -> ArmRight -0.619 PAST the limit -> kinematic limit-fight shoved the base ~2m every reach). 2026-07-23c: columns +0.01 (pure z raise) \u2014 the gripper UNDERSIDE (Gripper_Link3 min z 0.270) sat 6mm INSIDE the object top (0.276); now it clears by ~4mm so the hand rests just above the object while the fingers pinch the rim/upper side (the same top-grasp geometry as the working MuJoCo close).",
+ "base_xy_yaw": [
+  5.84812,
+  -6.45205,
+  -1.05277
+ ],
+ "object_xyz": [
+  6.21264,
+  -7.05381,
+  0.14067
+ ],
+ "object_radius": 0.075,
+ "object_half_h": 0.14,
+ "ik_target": [
+  6.16295,
+  -6.97306,
+  0.14067
+ ],
+ "gripper_expected_world": [
+  6.16295,
+  -6.97306,
+  0.14067
+ ],
+ "arm_joints": {
+  "BaseJoint_1": -0.366504,
+  "ColumnLeftBearingJoint_1": 0.295267,
+  "RotationLeftJoint_1": 0.833001,
+  "ArmLeftJoint_1": 0.44,
+  "ArmRightJoint_1": -0.488662,
+  "ContactCylinderJoint_1_1": -0.039481,
+  "HandBearingJoint_1": -0.176522,
+  "gripper_z_rotation_1": -1.8726,
+  "gripper_y_rotation_1": -0.538241,
+  "gripper_x_rotation_1": 0.783807,
+  "ColumnRightBearingJoint_1": 0.405267,
+  "ContactCylinderJoint2_1": 0.044532
+ },
+ "fingers_open": {
+  "finger_c_joint_1_1": -0.493,
+  "finger_b_joint_1_1": -0.493,
+  "finger_a_joint_1_1": -1.04,
+  "finger_c_joint_2_1": 0.0,
+  "finger_b_joint_2_1": 0.0,
+  "finger_a_joint_2_1": 0.0,
+  "finger_c_joint_3_1": -0.0476,
+  "finger_b_joint_3_1": -0.0476,
+  "finger_a_joint_3_1": -0.0476,
+  "palm_finger_c_joint_1": 0.161,
+  "palm_finger_b_joint_1": 0.161
+ },
+ "finger_close_max": 0.2,
+ "close_note": "per-finger force-stop: close each finger until normal force N >= N_req = safety*mass*g/(mu*3), then freeze that finger at contact qpos; others keep closing. verify = opposing pinch (thumb-a vs b/c)."
+}
