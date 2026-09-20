@@ -3,6 +3,11 @@ from ompl import base as ob
 from ompl import geometric as og
 from ompl import util as ou
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# The floor plan, shared with morph/config.py. Importing config itself would apply its 29-setting
+# environment profile and print into this child; `morph.rects` is data and does neither.
+from morph.rects import RACK_RECTS, WALL_RECTS
+
 # RRTConnect samples randomly, so NAV_SEED is needed for a reproducible run.
 _SEED = os.environ.get("NAV_SEED")
 if _SEED:
@@ -12,21 +17,9 @@ FLOOR_X      = (0.0, 8.0)
 FLOOR_Y      = (-8.0, 0.0)
 ROBOT_RADIUS = 0.65   # covers the chassis's widest yaw profile
 
-# (x_min, x_max, y_min, y_max), inflated by ROBOT_RADIUS at check time.
-#
-# The pick-to-shelf detour is geometry, not a planner fault: with the inflation, the only opening
-# between the two docks is the west corridor, so a first leg heading away from the goal is optimal.
-OBSTACLE_RECTS = [
-    (2.55, 4.34, -3.96, -3.41),   # middle-front row: the placement target, carrying the slot sites
-    (4.34, 7.96, -3.96, -3.41),   # middle-front row, east of the target
-    (2.54, 7.96, -4.55, -3.97),   # middle-back row
-    (0.72, 7.97, -7.96, -7.42),   # south rack row
-    (2.54, 7.96, -0.66, -0.04),   # north rack row
-    # walls: west, east, north
-    (-0.1, 0.1,  -8.0,  0.0),
-    (7.9,  8.1,  -8.0,  0.0),
-    (0.0,  8.0,  -0.1,  0.1),
-]
+# (x_min, x_max, y_min, y_max), inflated by ROBOT_RADIUS at check time. The pick-to-shelf detour
+# is geometry: with the inflation the only opening between the two docks is the west corridor.
+OBSTACLE_RECTS = [*RACK_RECTS, *WALL_RECTS]
 
 class ValidityChecker(ob.StateValidityChecker):
     def __init__(self, si, discs=None):
@@ -106,8 +99,8 @@ def plan(start_xy, goal_xy, solve_time=1.5, use_rrt_connect=True, discs=None):
         return None
 
     path = pdef.getSolutionPath()
-    # Simplify before interpolating: the first feasible path overshoots, and a loaded base -- wider
-    # than the planning model -- can wedge on those detours. Reverted below if a shortcut breaks.
+    # Simplify before interpolating: the first feasible path overshoots and a loaded base can wedge on
+    # the detours. EFFECTIVE DEFAULT IS 1 -- morph/config.py setdefaults it before this child spawns.
     if os.environ.get("AH_NAV_SIMPLIFY", "0") == "1":
         try:
             _raw_n = path.getStateCount()

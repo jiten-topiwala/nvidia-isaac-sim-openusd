@@ -36,19 +36,6 @@
   "ColumnRightBearingJoint_1": 0.405267,
   "ContactCylinderJoint2_1": 0.044532
  },
- "fingers_open": {
-  "finger_c_joint_1_1": -0.493,
-  "finger_b_joint_1_1": -0.493,
-  "finger_a_joint_1_1": -1.04,
-  "finger_c_joint_2_1": 0.0,
-  "finger_b_joint_2_1": 0.0,
-  "finger_a_joint_2_1": 0.0,
-  "finger_c_joint_3_1": -0.0476,
-  "finger_b_joint_3_1": -0.0476,
-  "finger_a_joint_3_1": -0.0476,
-  "palm_finger_c_joint_1": 0.161,
-  "palm_finger_b_joint_1": 0.161
- },
  "finger_close_max": 0.2,
  "close_note": "per-finger force-stop: close each finger until normal force N >= N_req = safety*mass*g/(mu*3), then freeze that finger at contact qpos; others keep closing. verify = opposing pinch (thumb-a vs b/c)."
 }

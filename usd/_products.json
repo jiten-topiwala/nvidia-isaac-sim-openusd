@@ -2,61 +2,61 @@
   {
     "key": "brisk",
     "hide_prim": "minimarket_brisk",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/brisk/texture.png"
+    "texture": "minimarket/brisk/texture.png"
   },
   {
     "key": "crunch",
     "hide_prim": "minimarket_crunch",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/crunch/texture.png"
+    "texture": "minimarket/crunch/texture.png"
   },
   {
     "key": "nescafe_caffeine",
     "hide_prim": "minimarket_nescafe_caffeine",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/nescafe_caffeine/texture.png"
+    "texture": "minimarket/nescafe_caffeine/texture.png"
   },
   {
     "key": "nescafe_caramel",
     "hide_prim": "minimarket_nescafe_caramel",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/nescafe_caramel/texture.png"
+    "texture": "minimarket/nescafe_caramel/texture.png"
   },
   {
     "key": "nescafe_dolce",
     "hide_prim": "minimarket_nescafe_dolce",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/nescafe_dolce/texture.png"
+    "texture": "minimarket/nescafe_dolce/texture.png"
   },
   {
     "key": "nescafe_mocha",
     "hide_prim": "minimarket_nescafe_mocha",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/nescafe_mocha/texture.png"
+    "texture": "minimarket/nescafe_mocha/texture.png"
   },
   {
     "key": "nescafe_spark_water",
     "hide_prim": "minimarket_nescafe_spark_water",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/nescafe_spark_water/texture.png"
+    "texture": "minimarket/nescafe_spark_water/texture.png"
   },
   {
     "key": "nescafe_taster",
     "hide_prim": "minimarket_nescafe_taster",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/nescafe_taster/texture.png"
+    "texture": "minimarket/nescafe_taster/texture.png"
   },
   {
     "key": "nestle_candy",
     "hide_prim": "minimarket_nestle_candy",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/nestle_candy/texture.png"
+    "texture": "minimarket/nestle_candy/texture.png"
   },
   {
     "key": "nestle_cirnation",
     "hide_prim": "minimarket_nestle_cirnation",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/nestle_cirnation/texture.png"
+    "texture": "minimarket/nestle_cirnation/texture.png"
   },
   {
     "key": "skinny_cow",
     "hide_prim": "minimarket_skinny_cow",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/skinny_cow/texture.png"
+    "texture": "minimarket/skinny_cow/texture.png"
   },
   {
     "key": "vans_cereal",
     "hide_prim": "minimarket_vans_cereal",
-    "texture": "/home/aman/aman_files/motion-planning/src/env/minimarket/vans_cereal/texture.png"
+    "texture": "minimarket/vans_cereal/texture.png"
   }
 ]

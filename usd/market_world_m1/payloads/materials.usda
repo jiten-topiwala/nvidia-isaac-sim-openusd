@@ -12,7 +12,7 @@ Generated from Composed Stage of root layer /tmp/mjcf_import_market_world_m1_h9m
 Generated from Composed Stage of root layer /tmp/mjcf_import_market_world_m1_h9m54bwk/temp_market_world_m1/market_world_m1.usd
 
 
-Generated from Composed Stage of root layer /home/aman/aman_files/motion-planning/isaac_sim/usd/market_world_m1/payloads/base.usd
+Generated from Composed Stage of root layer usd/market_world_m1/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1

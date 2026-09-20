@@ -1,16 +1,13 @@
 """Scene-side helpers: object scatter, colliders, rack keep-outs and the grip material.
-
-Split out of play_isaac.py; the method bodies are unchanged. Imports Isaac APIs at module
-level, so it is only importable after SimulationApp exists — see `morph/__init__.py`.
+Imports Isaac APIs at module level, so it is only importable after SimulationApp exists.
 """
 import os
 
 import numpy as np
-import scene
 from pxr import UsdPhysics
 
-from morph.config import (NUM_OBJECTS, PERFECT, SPAWN_ZONES, RACK_RECTS, SPAWN_EDGE_MARGIN,
-    MIN_OBJ_SEPARATION, SPAWN_ROBOT_KEEP_CENTER, SPAWN_ROBOT_KEEP_RADIUS)
+from morph.config import (NUM_OBJECTS, SPAWN_ZONES, RACK_RECTS, SPAWN_EDGE_MARGIN,
+    MIN_OBJ_SEPARATION, SPAWN_ROBOT_KEEP_CENTER, SPAWN_ROBOT_KEEP_RADIUS, fallback_spawn_xy, spawn_seed)
 
 
 class WorldMixin:
@@ -19,11 +16,10 @@ class WorldMixin:
     def _apply_grip_material(self):
         from isaacsim.core.api.materials.physics_material import PhysicsMaterial
         from isaacsim.core.prims import SingleGeometryPrim
-        from pxr import Usd, UsdPhysics
-        # The coefficient is GRIP_MU, and the mode is GRIP_MODE. Setting the internal constant's
-        # name on the command line does not select a mode — it would silently change mu instead, on
-        # the pads AND the floor, since this material is applied to both.
-        mu = 5.0
+        from pxr import UsdPhysics
+        # Applied LAST, with a strongerThanDescendants binding, so it supersedes scene.py's material on
+        # every grasp shape. Friction only: scene.py's compliant contact does NOT survive this rebind.
+        mu = float(os.environ.get("GRIP_MU", "5.0"))
         gmat = PhysicsMaterial(prim_path="/World/PhysicsMaterials/grip", name="gripmat",
                                static_friction=mu, dynamic_friction=mu * 0.8, restitution=0.0)
         for p in self.stage.Traverse():
@@ -50,17 +46,15 @@ class WorldMixin:
         return np.linalg.norm(np.array([x, y]) - SPAWN_ROBOT_KEEP_CENTER) < SPAWN_ROBOT_KEEP_RADIUS
 
     def _obj_collision(self, obj_idx, enabled):
-        """NO-OP.  Objects are kinematic + collision-free from LOAD TIME (scene.fixup_scene): even
-        the single target-object collider toggle turned out to invalidate the live articulation view
-        in headed mode (apply_action -> applied_actions None -> dead session mid-reach) — the third
-        member of the runtime-USD-churn crash family after the loop-joint and bystander-shield
-        toggles.  Rule: NEVER touch USD physics attrs while the articulation view is live."""
+        """NO-OP: objects are kinematic and collision-free from load time (scene.fixup_scene).
+        Toggling a collider invalidates the live articulation view (apply_action -> applied_actions
+        None -> dead session). NEVER touch USD physics attrs while that view is live."""
         return
 
     def scatter_objects(self):
-        """Randomly place the objects: cycle the aisle zones and rejection-sample against the rack
-        and robot-start keep-outs and the inter-object spacing."""
-        seed = int(os.environ.get("SEED", "0"))
+        """Place objects randomly: cycle the aisle zones, rejection-sample against the rack and
+        robot-start keep-outs and the inter-object spacing."""
+        seed = spawn_seed()
         rng = np.random.default_rng(seed)
         placed = []
         for i in range(NUM_OBJECTS):
@@ -81,14 +75,18 @@ class WorldMixin:
                 if done:
                     break
             if not done:
-                placed.append(np.array([0.5 + 0.4 * i, -5.0]))   # fallback
+                p = fallback_spawn_xy(placed, self._spawn_keepout)
+                if p is None:
+                    raise RuntimeError(f"no legal spawn left for object {i} of {NUM_OBJECTS}")
+                placed.append(p)
             self.objs[i].set_world_poses(positions=np.array([[placed[i][0], placed[i][1], self.obj_half_h]]),
                                          orientations=np.array([[1, 0, 0, 0]]))
             self.objs[i].set_velocities(np.zeros((1, 6)))
-        # settle on the floor — hold the arm at PARK every step (never step untargeted, or the heavy
-        # arm collapses under its own gain and blows up the articulation)
+        # Settle on the floor, holding the arm at PARK every step: stepping untargeted lets the
+        # heavy arm collapse under its own gain and blow up the articulation.
         for _ in range(int(0.5 / self.dt)):
-            self._force(self.q0)   # kinematic (NO_LOOP: no joint holds the passives)
+            # kinematic (NO_LOOP: no joint holds the passives)
+            self._force(self.q0)
             self._apply(self.q0)
             self.world.step(render=False)
         for o in self.objs:
@@ -97,9 +95,9 @@ class WorldMixin:
         print(f">>> scattered {NUM_OBJECTS} objects (seed={seed})", flush=True)
 
     def _nav_discs(self, target=None):
-        """Keep-out discs for nav: every unplaced floor object.  r = chassis half-width (~0.45)
-        + object radius + margin.  The pick TARGET gets a smaller disc (its dock is only ~0.7m
-        out) — the path may come NEAR it but never through it."""
+        """Keep-out discs [x, y, r] for nav, one per unplaced floor object; r (m) = chassis
+        half-width (~0.45) + object radius + margin. The pick TARGET gets a smaller disc: its dock
+        is only ~0.7 m out, so the path may pass near it but never through it."""
         placed_ids = {p[0] for p in self.placed}
         discs = []
         for i in range(NUM_OBJECTS):
