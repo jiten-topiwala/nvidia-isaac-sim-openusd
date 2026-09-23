@@ -15,7 +15,7 @@
 
 <p align="center"><em>▶ Navigate to a scattered object, grasp it, carry it to the rack, and place it on an assigned shelf slot — one button.</em></p>
 
-https://github.com/user-attachments/assets/bf235981-c034-478d-abdb-74a20daf213c
+https://github.com/user-attachments/assets/059d786e-839b-4b67-9591-12fefacb46d0
 
 *One uncut cycle to a low slot: scatter, plan, dock, descend, close on measured force, lift, carry, insert, release, park.*
 
@@ -277,7 +277,7 @@ the fingers interpolate between them. A position command, not a grasp: the autom
 on measured pad force instead, and this slider will squeeze whatever is between the fingers rather
 than stopping on contact.
 
-https://github.com/user-attachments/assets/0a988800-6525-4be4-89c7-d133cf3d7c63
+https://github.com/user-attachments/assets/ce22ab07-18fe-4c53-bb1d-1f6894826db2
 
 *Arming the jog, the arm sliders, the base joystick and the gripper curl.*
 
@@ -300,14 +300,14 @@ slot is at the top of this README; the rest cover the other two heights and the 
 
 ### Mid slot
 
-https://github.com/user-attachments/assets/b29a42dd-3913-44eb-a423-fef9728e1c62
+https://github.com/user-attachments/assets/97e494f6-5098-4774-b724-ccc197ba58ae
 
 *A different object and a mid-height slot: the carry rides at slot height and the insert slides
 over the board rather than dropping onto it.*
 
 ### High slot
 
-https://github.com/user-attachments/assets/eceb8d9f-2e01-4d21-bb1d-340cf3db5a1c
+https://github.com/user-attachments/assets/e9ff8f47-b569-42cb-8472-88e4d6d6267e
 
 *The high slots are where the reach is tightest — the place dock is solved from the chassis
 plate's projected reach so the arm still clears the board above.*
@@ -318,11 +318,11 @@ The same cycles with the editor left open, so the stage tree, the property panel
 scene are visible around the viewport: this is a live PhysX articulation being stepped, not a
 rendered clip.
 
-https://github.com/user-attachments/assets/a9f4e88b-b6b5-48db-9999-b9a96ef6b40d
+https://github.com/user-attachments/assets/b0b45937-7c96-492b-b57b-63887c1bc942
 
 *Mid slot, editor visible.*
 
-https://github.com/user-attachments/assets/5051af2c-5760-4a8e-8640-b56871705f4f
+https://github.com/user-attachments/assets/e47a9b76-1fbe-4c26-9c02-cc2f720a035c
 
 *High slot, editor visible.*
 
