@@ -13,7 +13,7 @@ Generated from Composed Stage of root layer /tmp/mjcf_import_market_world_m1_h9m
 Generated from Composed Stage of root layer /tmp/mjcf_import_market_world_m1_h9m54bwk/temp_market_world_m1/market_world_m1.usd
 
 
-Generated from Composed Stage of root layer /home/aman/aman_files/motion-planning/isaac_sim/usd/market_world_m1/payloads/base.usd
+Generated from Composed Stage of root layer usd/market_world_m1/payloads/base.usd
 """
     kilogramsPerUnit = 1
     metersPerUnit = 1
@@ -1167,8 +1167,8 @@ def Xform "Market_M1" (
                         int[] primvars:displayOpacity:indices = None
                         double size = 2
                         quatf xformOp:orient = (1, 0, 0, 0)
-                        float3 xformOp:scale = (0.35, 0.3, 0.01)
-                        double3 xformOp:translate = (0, 0, 0.148566)
+                        float3 xformOp:scale = (0.35, 0.3, 0.008725)
+                        double3 xformOp:translate = (0, 0, 0.147291)
                         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
                     }
 

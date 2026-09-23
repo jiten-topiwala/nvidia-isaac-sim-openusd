@@ -1,43 +1,25 @@
-"""The pick cycle.
-
-`pick` runs a fixed sequence of stages against the live scene; each one reads what the stage
-before it left and either advances or sets `alive = False`:
-
-    setup     dock-angle search with a clear corridor, then nav             dock.py
-    pose      force the settled arm config + cupped fingers                 dock.py
-    reach     replay the baked reach trajectory                             reach.py
-    settle    snap the residue, switch to the settle gains                  descend.py
-    descend   fine align: pinch centroid onto the object centre             descend.py
-    close     the driven finger close                                       close_anim.py
-    seat      compute the seat pose the pin will freeze                     grasp.py
-    capture   hold, capture the grip offset, decide `held`                  grasp.py
-    lift      replay the lift and check the object actually rose            grasp.py
-
-Everything that crosses a stage boundary lives on `_PickState`; anything else is local to one
-stage. `_animate_fingers` (animate.py) and the finger-pose helpers (prep.py) are called by the
-stages rather than being stages themselves.
-"""
+"""The pick cycle: a fixed, order-dependent sequence -- setup, pose, reach, settle, descend,
+close, seat, capture, lift -- each stage reading what the one before left and either advancing
+or setting `alive = False`. State crossing a stage boundary lives on `_PickState`."""
 import os
 from morph.config import HEADLESS, KNOWN
 import numpy as np
 
-from morph.pick.animate import FingerAnimStage
+from morph.pick.approach import ApproachStage
 from morph.pick.close_anim import CloseAnimStage
 from morph.pick.descend import DescendStage
 from morph.pick.dock import DockStage
 from morph.pick.grasp import GraspStage
-from morph.pick.prep import PrepStage
 from morph.pick.reach import ReachStage
 
 __all__ = ["PickMixin"]
 
 
 class _PickState:
-    """The locals that cross stage boundaries. If a name is not here it belongs to exactly one
-    stage — that is the contract."""
+    """The locals that cross stage boundaries; a name not here belongs to exactly one stage."""
 
-    __slots__ = ("obj_idx", "status", "O", "psi", "dock", "reach_ok", "qg", "obj", "park",
-                 "close_anim", "replay", "cup_fingers", "pin_bystanders", "restore_bystanders",
+    __slots__ = ("obj_idx", "status", "O", "psi", "dock", "qg", "obj", "park",
+                 "replay", "pin_bystanders", "restore_bystanders",
                  "alive", "grip", "seat", "seat_gap", "floor_pos", "held", "_oc0")
 
     def __init__(self, obj_idx, status):
@@ -45,32 +27,27 @@ class _PickState:
         self.alive, self.held = True, False
 
 
-class PickMixin(PrepStage, FingerAnimStage, DockStage, ReachStage, DescendStage,
+class PickMixin(DockStage, ApproachStage, ReachStage, DescendStage,
                 CloseAnimStage, GraspStage):
     """Mixed into Demo. Every `self.*` it touches is owned by Demo."""
 
     def _settle_hand(self, tag, tol=None, t_max=None):
-        """Hold the current joint command until the pinch stops moving. Returns the final
+        """Hold the current joint command until the pinch stops moving; returns the final
         per-step pinch speed (m/step)."""
         tol = 0.0002 if tol is None else tol
         n_max = int((float(os.environ.get("SETTLE_T", "2.5")) if t_max is None else t_max) / self.dt)
         q = np.asarray(self.robot.get_joint_positions(), float).copy()
         p_last = np.asarray(self._pinch(), float)
         v, k = 1e9, 0
-        # Watch the object while the hand holds still. The hand is kinematically forced here, so a
-        # palm resting on the object is an infinite-stiffness wall and the object can be driven
-        # through the floor before any close stage runs.
-        _ow = self._obj_by_focus() if hasattr(self, "_obj_by_focus") else None
-        if _ow is None:
-            _fo = getattr(self, "_focus_obj", None)
-            _ow = self.objs[int(_fo.rsplit("_", 1)[-1])] if _fo else None
+        # Watch the object while the hand holds still: the hand is kinematically forced, so a palm
+        # resting on the object is an infinite-stiffness wall that can drive it through the floor.
+        _fo = getattr(self, "_focus_obj", None)
+        _ow = self.objs[int(_fo.rsplit("_", 1)[-1])] if _fo else None
         _z0 = float(np.asarray(_ow.get_world_poses()[0][0], float)[2]) if _ow is not None else None
         _z_said = False
-        # How close is the hand before the settle even starts? A descent that reports zero object
-        # contacts can still leave the object departing within a few steps of this loop, under
-        # either hold mode -- consistent with the hand finishing the descent already INSIDE the
-        # contact offset, where no event has fired but the smallest motion makes one.
-        if _ow is not None and os.environ.get("SETTLE_CLEAR", "1") == "1":
+        # How close is the hand before the settle starts? A descent reporting zero contacts can
+        # still finish INSIDE the contact offset, where the smallest motion makes one.
+        if _ow is not None:
             try:
                 _oc = np.asarray(_ow.get_world_poses()[0][0], float)
                 _r = float(KNOWN["object_radius"])
@@ -89,9 +66,7 @@ class PickMixin(PrepStage, FingerAnimStage, DockStage, ReachStage, DescendStage,
         for k in range(n_max):
             if _ow is not None and not _z_said:
                 self._ctcN = {}
-            # Do NOT kinematically force the arm while settling. A palm resting on the object is an
-            # infinite-stiffness wall, and over a couple of seconds it displaces the object through
-            # the floor with no contact force at all -- a kinematic body does not need any.
+            # SETTLE_FORCE=0: a forced palm displaces the object with no contact force at all.
             if os.environ.get("SETTLE_FORCE", "1") == "1":
                 self._force(q)
             self._apply(q)
@@ -115,59 +90,153 @@ class PickMixin(PrepStage, FingerAnimStage, DockStage, ReachStage, DescendStage,
         return v
 
     def _obj_state(self, st, tag):
-        """Object tilt + height at a pick-stage boundary — the fastest way to name the stage
-        that destabilises it. Extracts the stage's object and defers to `_obj_watch`."""
+        """Log object tilt + height at a stage boundary -- names the stage that destabilises it."""
         obj = getattr(st, "obj", None)
         if obj is not None:
             self._obj_watch(obj, tag, rest=self.obj_half_h)
 
     def pick(self, obj_idx, status=None):
-        self._gate_blocked = False           # close-gate veto from a PREVIOUS attempt must not leak
-        for _a in ("_cw_z0", "_cw_xy0", "_cw_said", "_cw_broke"):
-            # close-watch state is PER PICK: left stale, the "already reported" latch silences the
-            # probe for every cycle after the first
-            self.__dict__.pop(_a, None)
-        """Nav to a standoff facing the object, force the known arm config, seat the object in
-        the finger cage, close + pin.  Returns True on grasp."""
-        st = _PickState(obj_idx, status)
-        self._pick_setup(st)
-        # Stability trace. The close can receive an object that is already falling: nothing in
-        # contact at close entry, and the object still travelling and tilted -- so the instability
-        # arrives UPSTREAM and every close-side conclusion is downstream of whichever stage
-        # introduces it.
-        self._obj_state(st, "after-setup")
-        self._pick_pose(st)
-        self._obj_state(st, "after-pose")
-        self._pick_reach(st)
-        self._obj_state(st, "after-reach")
-        self._pick_settle(st)
-        self._obj_state(st, "after-settle")
-        self._pick_descend(st)
-        self._obj_state(st, "after-descend")
-        # Settle the hand before any geometry is measured. Entered with the hand still travelling
-        # millimetres per step, the object tracks it almost exactly -- dragged, not grasped -- and
-        # du and the palm clearance move by tens of millimetres over the settle.
-        self._settle_hand("approach-end")
-        self._obj_state(st, "after-settle-hand")
-        self._pick_close(st)
-        self._pad_trace("after-pick-close")   # between the close and the seat: who opens the hand?
-        if not st.alive:
-            # exploded or shoved: do NOT seat-sweep the object toward an invalid pinch point (that
-            # is what "flew" it across the arena) — fail clean, run_cycle retries in teleport mode.
-            st.restore_bystanders()
+        """The nominal grasp, then one attempt per APPROACH-YAW candidate if it failed -- each a
+        whole hand pose orbited about the object's vertical, already solved and already filtered
+        through the same `collides` the planner calls.
+
+        The WHOLE fan is walked: `grasp_candidates` carries no yaw term, so its order is a
+        preference, never a correctness condition. A checkpoint SAFETY ABORT ends the walk."""
+        _held = self._pick_attempt(obj_idx, status)
+        if self._safety_abort:
+            # BEFORE the success return: a settle abort does not clear `st.alive`, so the attempt
+            # can report a grasp with the flag latched and `place` would open the insert with it.
+
+            # a checkpoint rejected a configuration: the run halts
+            return False
+        if _held:
+            return True
+        if os.environ.get("GRASP_FAN", "0") != "1":
+            # OFF by default: the fan is solved in the arm-root frame as it stands NOW, but the attempt
+            # re-docks before the candidate is commanded, so a base-relative q8 lands elsewhere.
+            return False
+        if not self._cand_usable:
+            # `_plan_approach` is the only reader of `_grasp_cand`, and only an attempt that reached the
+            # reach ran it -- so after a refusal the walk would command candidates nothing reads.
+            print(f">>> PICK obj {obj_idx}: the attempt was refused before the reach, "
+                  f"so a candidate would be discarded unread -> no walk", flush=True)
+            return False
+        # the failed attempt may have shoved the object; the
+        self._recover()
+        cands = self._grasp_candidates(obj_idx)   # fan must orbit where the candidates will find it
+        for k, q8 in enumerate(cands, 1):
+            # Close the books on the attempt that just ended, as `run_cycle` does before its retry.
+            # Without it five attempts' degrades merge into the one cycle-end number.
+            self._fallback_tally(obj_idx, attempt="nominal" if k == 1 else f"candidate {k - 1}")
+            print(f">>> PICK obj {obj_idx}: nominal grasp failed -> approach candidate {k}",
+                  flush=True)
+            self._grasp_cand = q8
             try:
-                self.pin_chassis(False, "abort")
-            except Exception:
-                pass
+                held = self._pick_attempt(obj_idx, status)
+            finally:
+                # the NEXT nominal must solve its own goal again
+                self._grasp_cand = None
+            if self._safety_abort:
+                # BEFORE the success return, exactly as on the nominal path above: a candidate can latch the
+                # flag in its settle and still come back holding the object.
+                print(f">>> PICK obj {obj_idx}: candidate {k} hit a checkpoint SAFETY ABORT -> "
+                      f"walk ENDS (the run halts; the rejected configuration is never re-commanded)",
+                      flush=True)
+                break
+            if held:
+                return True
+            # the next candidate starts sane, as the retry does
+            self._recover()
+        return False
+
+    def _release_chassis(self, why):
+        """`pin_chassis(True)` monkey-patches `world.step`; every exit past the dock pin comes here."""
+        try:
+            self.pin_chassis(False, why)
+        except Exception:                      # noqa: BLE001 -- a release must not mask the exit
+            pass
+
+    def _pick_attempt(self, obj_idx, status=None):
+        """One pass of the fixed sequence: nav to a standoff facing the object, force the known arm
+        config, seat the object in the finger cage, close + pin.  Returns True on grasp.
+
+        `self._grasp_cand`, when `pick` has set it, is the grasp configuration `_plan_approach`
+        aims the reach at instead of solving the nominal one."""
+        # close-gate veto from a PREVIOUS attempt must not leak
+        self._gate_blocked = False
+        # ...and only THIS attempt's planned grasp seeds the fan
+        self._grasp_goal = None
+        for _a in ("_cw_z0", "_cw_xy0", "_cw_said", "_cw_broke"):
+            # close-watch state is PER PICK: stale, its latch silences the probe after cycle one
+            self.__dict__.pop(_a, None)
+        st = _PickState(obj_idx, status)
+        # Only the reach consumes a candidate; until it runs, `pick` must not walk the fan.
+        self._cand_usable = False
+        with self._time_stage('_pick_setup'):
+            self._pick_setup(st)
+        if not st.alive:
+            print(f">>> PICK obj {obj_idx}: held=False (no dock corridor)", flush=True)
+            return False
+        # Stability trace: the close can receive an object that is already falling, so the
+        # instability arrives UPSTREAM of every close-side conclusion.
+        self._obj_state(st, "after-setup")
+        with self._time_stage('_pick_pose'):
+            self._pick_pose(st)
+        if not st.alive:
+            self._release_chassis("no-bake")
+            print(f">>> PICK obj {obj_idx}: held=False (no baked trajectory)", flush=True)
+            return False
+        self._obj_state(st, "after-pose")
+        try:
+            _axz = float(self._obj_R(st.obj)[:, 2][2])
+        except Exception:
+            _axz = 1.0
+        if _axz < 0.9:
+            # A fallen cylinder is not pickable by this grasp, and planning to its rest height
+            # runs the descent fallback past the boom limit. Fail clean.
+            print(f">>> PICK obj {obj_idx}: object is lying on its side (axis.z {_axz:+.2f}) -> no pick", flush=True)
+            st.restore_bystanders()
+            self._release_chassis("fallen-object")
+            return False
+        self._cand_usable = True
+        with self._time_stage('_pick_reach'):
+            self._pick_reach(st)
+        self._obj_state(st, "after-reach")
+        # Gated, not sequential: a checkpoint abort leaves the arm at an intermediate pose, and the
+        # settle's `_hold` would command the rejected goal from there.
+        if st.alive:
+            with self._time_stage('_pick_settle'):
+                self._pick_settle(st)
+            self._obj_state(st, "after-settle")
+        if st.alive:
+            with self._time_stage('_pick_descend'):
+                self._pick_descend(st)
+            # SEAT_GUARDED=1: touch -> centre -> release seat, sensing depth/offset instead of
+            # assuming. Sequenced here, not inside the descent, so the grasp bench can align between.
+            if st.alive and os.environ.get("SEAT_GUARDED", "0") == "1":
+                self._pick_seat_guarded(st)
+            self._obj_state(st, "after-descend")
+            # Settle the hand before any geometry is measured: with the hand still travelling
+            # millimetres per step the object tracks it -- dragged, not grasped.
+            self._settle_hand("approach-end")
+            self._obj_state(st, "after-settle-hand")
+            with self._time_stage('_pick_close'):
+                self._pick_close(st)
+            # between close and seat: who opens the hand?
+            self._pad_trace("after-pick-close")
+        if not st.alive:
+            # exploded, shoved, or aborted at a checkpoint: do NOT seat-sweep toward an invalid
+            # pinch point (that flings the object across the arena) -- fail clean, run_cycle retries.
+            st.restore_bystanders()
+            self._release_chassis("abort")
             print(f">>> PICK obj {obj_idx}: held=False (aborted before seat)", flush=True)
             return False
-        self._pick_seat(st)
-        self._pick_capture(st)
-        self._pick_lift(st)
-        # Release the chassis only once the grasp is finished -- the place stage must be able to
-        # drive.
-        try:
-            self.pin_chassis(False, "pick-end")
-        except Exception:
-            pass
+        with self._time_stage('_pick_seat'):
+            self._pick_seat(st)
+        with self._time_stage('_pick_capture'):
+            self._pick_capture(st)
+        with self._time_stage('_pick_lift'):
+            self._pick_lift(st)
+        # Release the chassis only once the grasp is finished; place must be able to drive.
+        self._release_chassis("pick-end")
         return st.held

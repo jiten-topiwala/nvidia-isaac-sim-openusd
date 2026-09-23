@@ -1,9 +1,5 @@
-"""Shared Isaac Sim scene setup for the market world.
-
-Import this *after* the entry script has created `SimulationApp(...)`: the isaacsim and pxr
-modules only resolve once the Kit app is up. `load_scene()` is the single entry point, so the
-USD load and the converter-artifact fixups live in one place.
-"""
+"""Shared Isaac Sim scene setup; import only after the entry script created `SimulationApp(...)`,
+since isaacsim and pxr resolve once the Kit app is up. `load_scene()` is the single entry point."""
 import json
 import math
 import os
@@ -15,17 +11,13 @@ from isaacsim.core.utils.stage import add_reference_to_stage, is_stage_loading
 from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade, Vt
 
 HERE = os.path.dirname(__file__)
-# "perfect" = objects are real dynamic bodies held by finger-pad contact friction (real-world
-# physics); "practical" = the proven kinematic-puppet fallback.
-GRIP_MODE = os.environ.get("GRIP_MODE", "practical")   # practical = the verified demo mode
 USD = os.path.join(HERE, "usd/market_world_m1/market_world_m1.usda")
 PRODUCTS_USD = os.path.join(HERE, "usd/products_textured.usd")
 PRODUCTS_MANIFEST = os.path.join(HERE, "usd/_products.json")
 HOME_KEYFRAME = os.path.join(HERE, "usd/_home_keyframe.json")
 MARBLE = os.path.join(HERE, "usd/market_world_m1/Textures/white_marble_tile2.png")
 
-# The parallel-linkage equality that holds the arm up in MuJoCo doesn't convert, so force the arm to
-# the play.py PARK pose (else it sags into the chassis).
+# The parallel-linkage equality doesn't convert -> force the arm to play.py's PARK pose (else it sags).
 PARK_OVERRIDE = {
     "ColumnLeftBearingJoint": 1.2,
     "ColumnRightBearingJoint": 1.2,
@@ -34,9 +26,8 @@ PARK_OVERRIDE = {
 
 
 def fixup_scene(stage) -> None:
-    """Undo two converter artifacts: (1) jointless static env bodies import as dynamic
-    rigid bodies with bad mass and fall through the floor -> make them static; (2) the
-    `grasp_left*` welds import active and snap the 10 objects to the gripper -> delete."""
+    """Undo two converter artifacts: jointless env bodies import as dynamic and fall through the
+    floor -> make them static; the `grasp_left*` welds import active -> deactivate them."""
     geo = stage.GetPrimAtPath("/World/Geometry")
     n_static = 0
     n_kin = 0
@@ -46,60 +37,39 @@ def fixup_scene(stage) -> None:
             if name == "robot":
                 continue
             if name.startswith("pickup_obj"):
-                if GRIP_MODE == "perfect":
-                    # Perfect mode: real dynamic bodies with gravity and collision, held by pad
-                    # friction alone. The depenetration velocity is kept low so a squeeze cannot
-                    # eject the object.
-                    pb = PhysxSchema.PhysxRigidBodyAPI.Apply(child)
-                    # The depenetration kick is what throws the object. The arm is kinematically
-                    # forced, so any overlap -- even a fraction of a millimetre -- is resolved by
-                    # pushing the dynamic body out at up to this speed.
-                    pb.CreateMaxDepenetrationVelocityAttr(
-                        0.05)
-                    # hard ceiling on how fast a pickup object can ever travel — nothing in this
-                    # scene legitimately moves faster, and it bounds every remaining solver artifact
-                    pb.CreateMaxLinearVelocityAttr(1.0)
-                    # Maximum contact impulse: the bound on what one contact may do in a single
-                    # step, and the honest model of a compliant rubber pad.
-                    imp = 0.10
-                    if imp > 0:
-                        pb.CreateMaxContactImpulseAttr(imp)
-                    # threshold 0 -> EVERY persistent contact reports each step (the touch sensor /
-                    # pad-load telemetry); the default threshold hides resting low-force contacts
-                    cr = PhysxSchema.PhysxContactReportAPI.Apply(child)
-                    cr.CreateThresholdAttr(0.0)
-                    n_kin += 1
-                    continue
-                # Practical mode: gravity-free, collision-free dynamic puppets, moved by
-                # `set_world_poses`.
                 pb = PhysxSchema.PhysxRigidBodyAPI.Apply(child)
-                pb.CreateDisableGravityAttr(True)
-                for p in Usd.PrimRange(child):
-                    if p.HasAPI(UsdPhysics.CollisionAPI):
-                        UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr(False)
+                # Max contact impulse: bound on what one contact may do in a step. PhysX takes the MIN
+                # of a pair's caps, so this frees the FLOOR while the pads stay pinned by their own.
+                imp = float(os.environ.get("OBJ_IMPULSE", "0.10"))   # <= 0: no cap
+                if imp > 0:
+                    pb.CreateMaxContactImpulseAttr(imp)
+                # threshold 0 -> every persistent contact reports each step (the default hides resting
+                # low-force ones, i.e. the pad-load telemetry)
+                cr = PhysxSchema.PhysxContactReportAPI.Apply(child)
+                cr.CreateThresholdAttr(0.0)
                 n_kin += 1
                 continue
             if child.HasAPI(UsdPhysics.RigidBodyAPI):
                 UsdPhysics.RigidBodyAPI(child).CreateRigidBodyEnabledAttr(False)
                 for gc in list(child.GetChildren()):
                     if "Joint" in gc.GetTypeName():
-                        gc.SetActive(False)  # redundant world-fixed joint (in a payload)
+                        # redundant world-fixed joint (in a payload)
+                        gc.SetActive(False)
                 n_static += 1
     n_weld = 0
     phys = stage.GetPrimAtPath("/World/Physics")
     if phys.IsValid():
         for child in list(phys.GetChildren()):
             if child.GetName().startswith("grasp_left"):
-                # RemovePrim on a payload-composed prim FAILS SILENTLY (it edits the root layer,
-                # where the prim isn't defined) — the palm<->object FixedJoints stayed alive for the
-                # entire project.
+                # RemovePrim on a payload-composed prim FAILS SILENTLY (it edits the root layer, where
+                # the prim isn't defined) -- deactivate instead.
                 child.SetActive(False)
                 n_weld += 1
     left = [p.GetPath().pathString for p in stage.Traverse()
             if p.GetName().startswith("grasp_left") and p.IsActive()]
     if left:
         print(f">>> WARNING: {len(left)} grasp welds STILL ACTIVE: {left[:2]}", flush=True)
-    mode_note = "REAL dynamic (friction grip)" if GRIP_MODE == "perfect" else "gravity-free+collision-free"
+    mode_note = "REAL dynamic (friction grip)"
     print(f">>> fixup: {n_static} env bodies static, {n_weld} grasp welds removed, "
           f"{n_kin} pickup objects {mode_note}", flush=True)
 
@@ -114,10 +84,8 @@ def add_lighting(stage) -> None:
 
 
 def add_marble_floor(stage) -> None:
-    """Converter stretches the floor marble over the whole 8x8 plane; MuJoCo tiles it
-    4x4. MatPlane is behind an instance proxy/payload (un-patchable on the session
-    layer), so author an 8x8 quad with the marble tiled 4x4 and hide the converter
-    floor (its collision plane stays)."""
+    """Author an 8x8 quad with the marble tiled 4x4 and hide the converter's stretched floor, whose
+    collision plane stays and whose material sits behind an un-patchable instance proxy."""
     if not os.path.exists(MARBLE):
         return
     f = stage.GetPrimAtPath("/World/Geometry/floor")
@@ -155,8 +123,7 @@ def add_marble_floor(stage) -> None:
 
 
 def swap_in_textured_products(stage) -> None:
-    """Reference the re-authored textured products (build_textured_products.py) and hide
-    the converter's flat-colored originals. Skips silently if not built."""
+    """Reference the textured products and hide the converter's flat-colored originals."""
     if not os.path.exists(PRODUCTS_USD):
         print(">>> textured products not built (run gen_/build_textured_products.py)", flush=True)
         return
@@ -175,12 +142,8 @@ def find_articulation_root(stage):
 
 
 def apply_link_masses(stage, robot_root):
-    """Author REAL mass/inertia (from the MuJoCo model) on the robot links. The MJCF->USD
-    import left many links with identity {1,1,1} inertia or NEGATIVE mass — especially the
-    MASSLESS parallel-linkage frames (base_footprint, Rotation_Link_Right, camera_pov, the
-    articulation root): mass 0 in MuJoCo is fine, but PhysX makes them zero/negative-mass
-    rigid bodies that explode to non-finite on ANY contact impulse (the finger<->object grasp
-    NaN). Transfer MuJoCo's valid masses; give the massless frames a small stable default.
+    """Author real mass/inertia from the MuJoCo model on the robot links, with a small stable default
+    for massless frames (PhysX turns zero/negative-mass bodies non-finite on any contact impulse).
     Must run BEFORE world.reset() so the articulation initialises with real inertia."""
     path = os.path.join(HERE, "usd/_link_masses.json")
     if not os.path.exists(path):
@@ -198,9 +161,7 @@ def apply_link_masses(stage, robot_root):
         mapi = UsdPhysics.MassAPI.Apply(prim)
         if b["mass"] > 1e-9:
             is_finger = "finger" in prim.GetName()
-            # Floor the finger-link mass. The real links are ~0.007kg against a ~1kg object, and a
-            # link that light cannot absorb the contact impulse -- it goes non-finite on first
-            # touch.
+            # Floor the finger-link mass: a real ~0.007kg link goes non-finite on first touch.
             fm = 0.20
             m_link = max(b["mass"], fm) if is_finger else b["mass"]
             mapi.CreateMassAttr(m_link)
@@ -211,7 +172,8 @@ def apply_link_masses(stage, robot_root):
                 inertia = Gf.Vec3f(*[max(x, 1e-6) for x in b["inertia"]])
             mapi.CreateDiagonalInertiaAttr(inertia)
             q = b["iquat"]
-            mapi.CreatePrincipalAxesAttr(Gf.Quatf(q[0], q[1], q[2], q[3]))   # (w, x, y, z)
+            # (w, x, y, z)
+            mapi.CreatePrincipalAxesAttr(Gf.Quatf(q[0], q[1], q[2], q[3]))
             mapi.CreateCenterOfMassAttr(Gf.Vec3f(*b["ipos"]))
             n_real += 1
         else:                                    # massless MuJoCo frame -> small stable default
@@ -223,13 +185,10 @@ def apply_link_masses(stage, robot_root):
 
 
 def close_arm_loop(stage, robot_root):
-    """Reproduce the MORPH parallel-linkage MuJoCo `<connect>` ball constraint the MJCF->USD import
-    dropped: a SPHERICAL joint (3 translation DOF locked, rotation free) between Contact_Cylinder_1_1
-    and Contact_Cylinder_1_2, whose origins coincide (0.82mm) at the assembled pose (verified via
-    verify_loop_geom.py). `excludeFromArticulation=True` keeps the articulation a clean tree and adds
-    this as a MAXIMAL-coordinate loop constraint -> the passive linkage joints (RotationLeft/ArmRight/
-    ContactCylinder) are held by PHYSICS, not forced drives. This is the real fix for the 12cm offset
-    + the grip-load arm fling. The forced passive-joint drives MUST be slackened (kp=0) or they fight."""
+    """Re-create the parallel-linkage ball constraint the MJCF->USD import dropped: a spherical joint
+    between Contact_Cylinder_1_1/1_2, whose origins coincide at the assembled pose.
+    `excludeFromArticulation=True` makes it a maximal-coordinate loop constraint instead of an
+    articulation edge; the passive linkage drives must then be slack (kp=0) or they fight it."""
     def path_of(name):
         for p in Usd.PrimRange(stage.GetPrimAtPath(robot_root)):
             if p.GetName() == name:
@@ -242,141 +201,99 @@ def close_arm_loop(stage, robot_root):
     j = UsdPhysics.SphericalJoint.Define(stage, Sdf.Path(robot_root + "/LoopJoint_arm1"))
     j.CreateBody0Rel().SetTargets([a])
     j.CreateBody1Rel().SetTargets([b])
-    j.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0))          # anchor at each body origin (they coincide)
+    # anchor at each body origin (they coincide)
+    j.CreateLocalPos0Attr().Set(Gf.Vec3f(0, 0, 0))
     j.CreateLocalPos1Attr().Set(Gf.Vec3f(0, 0, 0))
     j.CreateLocalRot0Attr().Set(Gf.Quatf(1, 0, 0, 0))
     j.CreateLocalRot1Attr().Set(Gf.Quatf(1, 0, 0, 0))
-    j.CreateExcludeFromArticulationAttr().Set(True)         # <-- the loop-closure flag
+    j.CreateExcludeFromArticulationAttr().Set(True)
     j.CreateCollisionEnabledAttr().Set(False)
     print(f">>> close_arm_loop: spherical loop joint {a.name}<->{b.name} (excludeFromArticulation)", flush=True)
 
 
 def fix_finger_collision(stage, robot_root):
-    """Replace the crude thin box finger colliders (2.8x0.76x1.8cm pads that UNDER-cover the real
-    3.9x2.15x1.8cm fingertip -> glancing point-contact on the 15cm cylinder -> 0.04N, no grip) with a
-    CONVEX-HULL collider off the REAL finger mesh (link_*_real_V2) — exactly what MuJoCo collides with.
-    The mesh is INSTANCED (shared prototype), so a collider API can't be authored through the instance
-    proxy; the prior attempt found 0 meshes. FIX: de-instance the finger meshes FIRST (pass A), then in
-    a fresh traversal author convexHull collision on the now-real Mesh + disable the boxes (pass B).
-    Arm-1 fingers only (the grasping arm). Isaac-only. PAD_COLLIDER=0 to skip (keep the boxes)."""
+    """Give the arm-1 fingertips a collider off the REAL finger mesh instead of the thin boxes that
+    under-cover it. A collider API cannot be authored through an instance proxy, so de-instancing
+    the meshes must be its own first pass."""
     root = stage.GetPrimAtPath(robot_root)
 
-    def is_finger1(prim):                                   # arm-1 finger subtree only
+    # arm-1 finger subtree only
+    def is_finger1(prim):
         p = prim.GetPath().pathString
         return "finger_" in p and "Arm_1" in p
 
-    # Which finger links collide. On a large object the proximal and middle links sit inside it at
-    # the open pose, so rigid contact flings it -- there, tip-only is correct.
-    tip_only = os.environ.get("TIP", "all" if GRIP_MODE == "perfect" else "3") == "3"
-    def is_tip(prim):
-        p = prim.GetPath().pathString
-        return (not tip_only) or "link_3_1" in p
-
-    # pass A: de-instance the fingertip meshes so their Mesh children become editable
+    # pass A: de-instance the meshes about to be edited so their Mesh children become editable
     n_deinst = 0
-    # De-instance the proximal links too when the intent is to switch them OFF.
-    _prox_off = tip_only and os.environ.get("PROX_MESH_OFF", "1") == "1"
     for prim in Usd.PrimRange(root):
-        if (is_finger1(prim) and (is_tip(prim) or _prox_off)
-                and prim.GetName().endswith("real_V2") and prim.IsInstance()):
+        if is_finger1(prim) and prim.GetName().endswith("real_V2") and prim.IsInstance():
             prim.SetInstanceable(False)
             n_deinst += 1
 
-    # pass B: fresh traversal (sees the de-instanced children) — convex collider on each fingertip
-    # Mesh, disable EVERY finger box (link_1/2/3).
-    n_mesh = n_box = n_prox_off = 0
+    # pass B: fresh traversal (sees the de-instanced children); boxes off, mesh colliders on
+    n_mesh = n_box = 0
     for prim in Usd.PrimRange(root):
         if not is_finger1(prim):
             continue
         t = prim.GetTypeName()
         path = prim.GetPath().pathString
         if t == "Cube" and prim.HasAPI(UsdPhysics.CollisionAPI):
-            # These Cubes are the source model's fingertip pad geoms and carry the entire grip in
-            # the recorded grasp.
-            if os.environ.get("KEEP_BOXES", "0") == "1" and is_tip(prim):
+            # KEEP_BOXES=1 with MESH_PADS=0 reproduces the source collision model: pad boxes only.
+            if os.environ.get("KEEP_BOXES", "0") == "1":
                 continue
-            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)   # turn OFF the box collider
+            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
             n_box += 1
-        elif (t == "Mesh" and "real_V2" in path and is_tip(prim)
-              and os.environ.get("MESH_PADS", "1") == "1"):                   # the real fingertip mesh
-            # MESH_PADS=0 with KEEP_BOXES=1 reproduces the source collision model exactly: pad boxes
-            # only.
+        elif t == "Mesh" and "real_V2" in path and os.environ.get("MESH_PADS", "1") == "1":
             UsdPhysics.CollisionAPI.Apply(prim)
-            # convexHull of the NON-convex finger mesh balloons + deep-overlaps; convexDecomposition
-            # splits it into shape-following convex chunks (thinner, follows the pad).
+            # convexHull of the NON-convex finger balloons and deep-overlaps; decomposition follows it
             approx = os.environ.get("APPROX", "convexDecomposition")
             UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr(approx)
             n_mesh += 1
-        elif (t == "Mesh" and "real_V2" in path and not is_tip(prim)
-              and prim.HasAPI(UsdPhysics.CollisionAPI)
-              and os.environ.get("PROX_MESH_OFF", "1") == "1"):
-            # Free the proximal links. Disabling their pad boxes is not enough: the finger meshes
-            # carry CollisionAPI from the source asset, so with TIP=3 the link_1/link_2 meshes still
-            # collide and still block -- a proximal link ends up inside the object while that
-            # finger's pad is far out.
-            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
-            n_prox_off += 1
     n_palm = 0
-    if os.environ.get("DIAG_NOWHEEL") == "1":
-        n_offw = 0
+    # WHEEL_HUB_COLLIDE=0: floor contact goes through the ROLLERS, which is what lets the mecanum
+    # base translate and yaw. Load-time only -- never touch USD physics while the view is live.
+    if os.environ.get("WHEEL_HUB_COLLIDE", "1") == "0":
+        n_hub = 0
         for prim in Usd.PrimRange(root):
             pth = prim.GetPath().pathString
-            if ("roller" in pth or "wheel" in pth) and prim.HasAPI(UsdPhysics.CollisionAPI):
+            if ("wheel" in pth and "roller" not in pth and "slipping" not in pth
+                    and prim.HasAPI(UsdPhysics.CollisionAPI)):
                 UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
-                n_offw += 1
-        print(f">>> DIAG_NOWHEEL: {n_offw} wheel/roller colliders OFF", flush=True)
-    if os.environ.get("DIAG_NOHAND") == "1":
-        # Diagnostic: kill every collider in the arm-1 hand subtree — if the descent STILL nudges
-        # the object, the toucher was never the hand (wrist/boom/chassis/field effect)
-        n_off2 = 0
-        for prim in Usd.PrimRange(root):
-            pth = prim.GetPath().pathString
-            if "Arm_1" in pth and prim.HasAPI(UsdPhysics.CollisionAPI):
-                UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
-                n_off2 += 1
-        print(f">>> DIAG_NOHAND: {n_off2} arm-1 colliders OFF", flush=True)
-    if GRIP_MODE == "perfect":
-        # The palm block's lip dips into the object at grasp depth. It is not a grip surface, and
-        # where the source model's soft contact tolerated the incidental press, rigid contact shoves
-        # the object away.
-        def _palm_hit(pth):
-            if (("Hand_Bearing_1" in pth or "Gripper_Link1_1" in pth)
-                    and "Gripper_Link2_1" not in pth):
-                # WRIST bodies (Hand_Bearing, Gripper_Link1): PhysX-verified plowing the object
-                # during the mouth slide — structure, not grip surface
-                return True
-            if "link_0_1" in pth and "link_1_1" not in pth:
-                # finger KNUCKLE mounts (link_0): fixed blocks, not grip surfaces
-                return True
-            if "Gripper_Link2_1/Sphere" in pth:
-                # Wrist bearing sphere: bearing structure between Link1 and the palm, never a grip
-                # surface — same rule as the other wrist bodies above.
-                return True
-            # PALM (Gripper_Link2/3 meshes) stays COLLIDABLE: it is the cage's BACKSTOP — with it
-            # off the thumb pushed the object straight out the back (13cm, both objects).
-            return False
-        for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
-            pth = prim.GetPath().pathString
-            if _palm_hit(pth) and prim.HasAPI(UsdPhysics.CollisionAPI) and prim.IsInstanceProxy():
-                anc = prim
-                while anc and not anc.IsInstance():
-                    anc = anc.GetParent()
-                if anc and anc.IsInstance():
-                    anc.SetInstanceable(False)
-        for prim in Usd.PrimRange(root):
-            pth = prim.GetPath().pathString
-            if _palm_hit(pth) and prim.HasAPI(UsdPhysics.CollisionAPI):
-                UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
-                n_palm += 1
-    # The mouth is only a mouth if the collider is concave. `palm_real_V2` is a concave mesh
-    # carrying a convexHull collider, and a convex hull of a concave palm FILLS THE CAVITY -- the
-    # visual shows an opening the physics does not have.
+                n_hub += 1
+        print(f">>> WHEEL_HUB_COLLIDE=0: {n_hub} wheel HUB colliders OFF (rollers carry the base)",
+              flush=True)
+    # Structure that plows the object at grasp depth without being a grip surface.
+    def _palm_hit(pth):
+        if (("Hand_Bearing_1" in pth or "Gripper_Link1_1" in pth)
+                and "Gripper_Link2_1" not in pth):
+            # wrist bodies
+            return True
+        if "link_0_1" in pth and "link_1_1" not in pth:
+            # finger knuckle mounts
+            return True
+        if "Gripper_Link2_1/Sphere" in pth:
+            # wrist bearing sphere
+            return True
+        # PALM (Gripper_Link2/3) stays COLLIDABLE: it is the cage's BACKSTOP for the thumb.
+        return False
+    for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
+        pth = prim.GetPath().pathString
+        if _palm_hit(pth) and prim.HasAPI(UsdPhysics.CollisionAPI) and prim.IsInstanceProxy():
+            anc = prim
+            while anc and not anc.IsInstance():
+                anc = anc.GetParent()
+            if anc and anc.IsInstance():
+                anc.SetInstanceable(False)
+    for prim in Usd.PrimRange(root):
+        pth = prim.GetPath().pathString
+        if _palm_hit(pth) and prim.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+            n_palm += 1
+    # `palm_real_V2` is concave: a convexHull collider FILLS THE MOUTH CAVITY the visual shows.
     n_papx = 0
     _papx = os.environ.get("PALM_APPROX", "convexDecomposition")
-    if GRIP_MODE == "perfect" and _papx:
-        # COLLECT the ancestors first: de-instancing DURING the traversal expires the iterator
-        # ("Iterator points to expired 'Mesh' instance proxy prim"), because making an ancestor non-
-        # instanceable invalidates every proxy under it.
+    if _papx:
+        # COLLECT the ancestors first: de-instancing DURING the traversal expires the iterator,
+        # because making an ancestor non-instanceable invalidates every proxy under it.
         _anc = []
         for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
             pth = prim.GetPath().pathString
@@ -407,14 +324,12 @@ def fix_finger_collision(stage, robot_root):
         print(f">>> palm collider: {n_papx} meshes -> {_papx} (was convexHull, which fills the "
               f"mouth cavity)", flush=True)
     print(f">>> fix_finger_collision: de-instanced {n_deinst} tip meshes, {n_mesh} convex colliders, "
-          f"{n_prox_off} proximal meshes off, {n_box} boxes disabled (TIP_ONLY={tip_only}), {n_palm} palm-block colliders off", flush=True)
+          f"{n_box} boxes disabled, {n_palm} palm-block colliders off", flush=True)
 
 
 def resize_object(stage, radius, half_h=None):
-    """Shrink the pickup object's cylinder RADIUS (keep height for z-reach) so it's within the
-    gripper's stable-grasp size — a 15cm object is too big to wrap (proximal links penetrate) and a
-    fingertip pinch squirts it out; ~11cm (r=0.055) pinches cleanly. Sets radius on every Cylinder
-    under pickup_obj_0 (visual + collision) before world.reset so PhysX cooks the new shape. OBJ_RADIUS env."""
+    """Set radius (and optionally height) on every pickup Cylinder, visual and collision, to a size
+    the gripper grasps stably (~11cm, r=0.055). Must run before world.reset so PhysX cooks it."""
     n = 0
     for prim in stage.Traverse():
         p = prim.GetPath().pathString
@@ -424,15 +339,11 @@ def resize_object(stage, radius, half_h=None):
             cy.GetRadiusAttr().Set(radius)
             # extent must track the size or the bbox/broadphase uses the old shape
             if half_h is not None:
-                # TALLER objects: the pads then land mid-FLANK (horizontal normals = real clamp)
-                # instead of on the top rim
+                # taller objects land the pads mid-FLANK (horizontal normals = real clamp)
                 cy.GetHeightAttr().Set(2.0 * half_h)
             h = cy.GetHeightAttr().Get() or 0.28
             cy.GetExtentAttr().Set([(-radius, -radius, -h / 2), (radius, radius, h / 2)])
-            # Author the mass, or resizing silently makes the object a feather. Nothing sets one, so
-            # PhysX derives it from the shape at a very low effective density, and shrinking the
-            # cylinder cuts the mass with the VOLUME -- a smaller object is also several times
-            # lighter.
+            # Author the mass or resizing makes the object a feather: PhysX derives it from the shape.
             _dens = float(os.environ.get("OBJ_DENSITY", "800.0"))
             if _dens > 0:
                 body = prim.GetParent() if prim.GetParent().HasAPI(UsdPhysics.RigidBodyAPI) else prim
@@ -448,35 +359,27 @@ def resize_object(stage, radius, half_h=None):
 
 
 def tune_physics(stage, robot_root):
-    """Tighten the solver for the finger-object grasp.
-
-    PhysX's defaults are too loose for it: rigid-contact impulses spike and the light finger links
-    go non-finite. This raises the solver iteration counts (TGS), runs finer substeps, and gives
-    the object and finger colliders a small contact offset so contact engages gradually rather
-    than all at once.
-    """
+    """Tighten the solver for the finger-object grasp: TGS, 240Hz substeps, raised iteration counts,
+    and a contact offset on the object and finger colliders so contact engages gradually."""
     for prim in stage.Traverse():
         if prim.IsA(UsdPhysics.Scene):
             sc = PhysxSchema.PhysxSceneAPI.Apply(prim)
             sc.CreateSolverTypeAttr("TGS")
-            sc.CreateTimeStepsPerSecondAttr(240)                 # 240Hz substeps (was 60)
-            # resolve dynamic contacts AFTER the articulation — grip-specific, cuts persistent
-            # penetration + gives stronger, stabler grasp contact forces
+            # 240Hz substeps
+            sc.CreateTimeStepsPerSecondAttr(240)
+            # resolve dynamic contacts AFTER the articulation: less penetration, stabler grasp forces
             prim.CreateAttribute("physxScene:solveArticulationContactLast",
                                  Sdf.ValueTypeNames.Bool).Set(True)
             break
-    # 64/16 is validated for this KINEMATICALLY-FORCED linkage. The usual TGS advice — velocity
-    # iterations 0 — is written for drive-based robots; applied here the forced arm sags well below
-    # its commanded pose with several rad/s of joint oscillation.
-    VEL_ITERS = 16
+    # 64/16 is PINNED for this KINEMATICALLY-FORCED linkage: the usual TGS advice of zero velocity
+    # iterations is written for drive-based robots, and here the forced arm sags and oscillates.
+    VEL_ITERS = int(os.environ.get("VEL_ITERS", "16"))
     ar = stage.GetPrimAtPath(robot_root)
     if ar.IsValid():
         pa = PhysxSchema.PhysxArticulationAPI.Apply(ar)
         pa.CreateSolverPositionIterationCountAttr(64)
         pa.CreateSolverVelocityIterationCountAttr(VEL_ITERS)
-        # Self-collision: opt-in, and selective when on. The reason to disable it is real but narrow
-        # -- converted MJCF hands generate phantom finger-versus-finger contacts, a well-known
-        # articulation-explosion source.
+        # Self-collision is opt-in: converted MJCF hands generate phantom finger-vs-finger contacts.
         _sc = os.environ.get("SELF_COLLIDE", "0") == "1"
         pa.CreateEnabledSelfCollisionsAttr(_sc)
         if _sc:
@@ -503,8 +406,7 @@ def tune_physics(stage, robot_root):
             print(f">>> self-collision ON with {_n_filt} filtered hand-internal pairs "
                   f"(arm/gripper vs CHASSIS now collides; finger-vs-finger and finger-vs-palm "
                   f"stay off -- those are the phantom-contact explosion source)", flush=True)
-    # finger/gripper LINKS: cap velocity + depenetration so a swept object contact can't fling a
-    # light link to non-finite (values around 1e6). This caps the LINK directly, not just the obj.
+    # finger/gripper LINKS: cap velocity + depenetration on the LINK, not just the object
     n_fl = 0
     for prim in Usd.PrimRange(stage.GetPrimAtPath(robot_root)):
         nm = prim.GetName()
@@ -517,8 +419,7 @@ def tune_physics(stage, robot_root):
             rb.CreateSolverVelocityIterationCountAttr(VEL_ITERS)
             n_fl += 1
     print(f">>> finger-link stabilize: {n_fl} links (vel + depenetration cap + iters)", flush=True)
-    # The conversion clamped the b/c finger joint_1 lower limit ABOVE the commanded open pose, so
-    # those fingers stick nearly closed and cannot grip.
+    # The conversion clamped the b/c finger joint_1 lower limit ABOVE the commanded open pose.
     n_lim = 0
     for prim in stage.Traverse():
         nm = prim.GetName()
@@ -537,45 +438,35 @@ def tune_physics(stage, robot_root):
             rb = PhysxSchema.PhysxRigidBodyAPI.Apply(child)
             rb.CreateSolverPositionIterationCountAttr(64)
             rb.CreateSolverVelocityIterationCountAttr(VEL_ITERS)
-            # hard velocity cap + damping: a bad swept-penetration contact can't launch the object
-            # across the room (was hitting 500+ m/s); it stays put and settles into grip.
+            # velocity cap: a bad swept-penetration contact can't launch the object across the room
             rb.CreateMaxLinearVelocityAttr(1.5)
             rb.CreateMaxAngularVelocityAttr(8.0)
-            # Cap the depenetration velocity. This, not the hand, launches the object: the position-
-            # controlled hand is effectively infinite mass, so it presses the object into the static
-            # FLOOR and the solver resolves that overlap by pushing them apart.
+            # Depenetration launches the object: the hand is effectively infinite mass against the floor
             rb.CreateMaxDepenetrationVelocityAttr(
-                0.10)
-            # High linear damping resists the early one-sided shove during the close: the first
-            # finger to touch would otherwise push the free object out before the others engage.
+                float(os.environ.get("DEPEN_VEL", "0.10")))
+            # damping resists the one-sided shove from the first finger to touch during the close
             rb.CreateLinearDampingAttr(float(os.environ.get("OBJ_DAMP", "0.5")))
             rb.CreateAngularDampingAttr(float(os.environ.get("OBJ_DAMP", "0.5")))
             cr = PhysxSchema.PhysxContactReportAPI.Apply(child)   # enable get_net_contact_forces
             cr.CreateThresholdAttr(0.0)
-    # The import bound a mu=0 material to the finger PADS, so the grip was frictionless and every
-    # object slid out on lift.
-    MU = float(os.environ.get("FRICTION", "5.0"))            # test knob (FRICTION=0.01 to check if it's applied)
+    # The import bound a mu=0 material to the finger PADS -- frictionless grip, objects slid out.
+    MU = 5.0                                                 # pad/object mu
     grip_mat = UsdShade.Material.Define(stage, "/World/Physics/GripMaterial")
     gp = UsdPhysics.MaterialAPI.Apply(grip_mat.GetPrim())
-    gp.CreateStaticFrictionAttr(MU)                          # match MuJoCo finger geom friction="5 5 5"
+    # match MuJoCo finger geom friction="5 5 5"
+    gp.CreateStaticFrictionAttr(MU)
     gp.CreateDynamicFrictionAttr(MU * 0.8)
     gp.CreateRestitutionAttr(0.0)
-    # combine mode MAX: default 'average' halves the pad friction against a lower-friction partner —
-    # with max, the pad's mu always wins the pairing (NVIDIA gripper guidance; the analog of
-    # MuJoCo's priority=1 finger geoms winning over the object's weaker triplet)
+    # Combine mode max, so the pad's mu wins the pairing instead of being averaged down. NOTE that
+    # morph/world.py rebinds its own material on every grasp shape, which sets no combine mode.
     PhysxSchema.PhysxMaterialAPI.Apply(grip_mat.GetPrim()).CreateFrictionCombineModeAttr("max")
     touched = set()
 
     def make_compliant(mprim):
-        """COMPLIANT CONTACT = MuJoCo's solref, ported.  MuJoCo's pads declare
-        solref="0.005 1": contact behaves as a spring-damper with time constant 5ms and damping
-        ratio 1, so force RAMPS with penetration over ~10 steps.  PhysX's default rigid contact
-        instead resolves the whole overlap in one step, which is why a pad arriving at 40mm/s
-        handed this cylinder metres per second and, once bounded, still
-        TIPPED it — a 300mm cylinder on a 160mm base goes over at a few newtons.
-        k = m/tau^2 = 1.025/0.005^2 = 4.1e4 N/m; c = 2*sqrt(k*m) for ratio 1."""
+        """Port MuJoCo's solref compliant contact onto a material: a 5ms spring-damper, so force RAMPS
+        with penetration instead of PhysX resolving the whole overlap in one step (k = m/tau^2)."""
         api = PhysxSchema.PhysxMaterialAPI.Apply(mprim)
-        k = 4.1e4
+        k = float(os.environ.get("PAD_STIFFNESS", "4.1e4"))
         if k <= 0:
             return False
         c = float(os.environ.get("PAD_DAMP", str(2.0 * (k * 1.025) ** 0.5)))
@@ -586,71 +477,66 @@ def tune_physics(stage, robot_root):
         except Exception:
             return False
     n_compliant = int(make_compliant(grip_mat.GetPrim()))
-    # The floor needs it too. The loop below matches the hand and the objects, so the GROUND keeps
-    # whatever the converter gave it and the object-versus-floor pair resolves near that instead.
+    # The floor needs friction too: the loop below only matches the hand and the objects.
     n_floor = 0
-    if GRIP_MODE == "perfect" and os.environ.get("FLOOR_MU_ON", "1") == "1":
-        _fmu = float(os.environ.get("FLOOR_MU", str(MU)))
-        _fkeys = ("floor", "Floor", "Plane", "ground", "Ground")
-        _fanc = []
-        for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
-            _p = prim.GetPath().pathString
-            if not prim.HasAPI(UsdPhysics.CollisionAPI) or not any(s in _p for s in _fkeys):
-                continue
-            if prim.IsInstanceProxy():
-                _a = prim
-                while _a and not _a.IsInstance():
-                    _a = _a.GetParent()
-                if _a and _a.IsInstance():
-                    _fanc.append(_a.GetPath())
-        for _pp in set(_fanc):
-            _a = stage.GetPrimAtPath(_pp)
+    _fmu = MU                                            # floor tracks the pad coefficient
+    _fkeys = ("floor", "Floor", "Plane", "ground", "Ground")
+    _fanc = []
+    for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
+        _p = prim.GetPath().pathString
+        if not prim.HasAPI(UsdPhysics.CollisionAPI) or not any(s in _p for s in _fkeys):
+            continue
+        if prim.IsInstanceProxy():
+            _a = prim
+            while _a and not _a.IsInstance():
+                _a = _a.GetParent()
             if _a and _a.IsInstance():
-                _a.SetInstanceable(False)
-        for prim in stage.Traverse():
-            _p = prim.GetPath().pathString
-            if not prim.HasAPI(UsdPhysics.CollisionAPI) or not any(s in _p for s in _fkeys):
-                continue
-            try:
-                _m, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial("physics")
-                if _m and _m.GetPrim().IsValid():
-                    _mp = UsdPhysics.MaterialAPI.Apply(_m.GetPrim())
-                    _mp.CreateStaticFrictionAttr(_fmu)
-                    _mp.CreateDynamicFrictionAttr(_fmu * 0.8)
-                    PhysxSchema.PhysxMaterialAPI.Apply(
-                        _m.GetPrim()).CreateFrictionCombineModeAttr("max")
-                else:
-                    UsdShade.MaterialBindingAPI.Apply(prim)
-                    UsdShade.MaterialBindingAPI(prim).Bind(grip_mat, materialPurpose="physics")
-                n_floor += 1
-            except Exception:
-                pass
-        print(f">>> floor friction: mu {_fmu} on {n_floor} ground colliders "
-              f"(was ~0.7 effective; breakaway 10N vs the wrap's 14N thumb)", flush=True)
-    # De-instance the grasp colliders first, or mu lands on nothing. The audit above finds enabled
-    # grasp colliders that a plain Traverse cannot see: they sit behind instance proxies under the
-    # Hand_Bearing links, and a material cannot be authored on a proxy -- so they keep whatever the
-    # converter gave them and the pad-versus-object pair resolves at that value whatever MU says.
-    if os.environ.get("MU_DEINSTANCE", "1") == "1":
-        _gkeys = ("finger", "Gripper", "palm", "pickup_obj")
-        _ganc = []
-        for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
-            _p = prim.GetPath().pathString
-            if not (prim.HasAPI(UsdPhysics.CollisionAPI) and any(k in _p for k in _gkeys)):
-                continue
-            if prim.IsInstanceProxy():
-                _a = prim
-                while _a and not _a.IsInstance():
-                    _a = _a.GetParent()
-                if _a and _a.IsInstance():
-                    _ganc.append(_a.GetPath())
-        for _pp in set(_ganc):
-            _a = stage.GetPrimAtPath(_pp)
+                _fanc.append(_a.GetPath())
+    for _pp in set(_fanc):
+        _a = stage.GetPrimAtPath(_pp)
+        if _a and _a.IsInstance():
+            _a.SetInstanceable(False)
+    for prim in stage.Traverse():
+        _p = prim.GetPath().pathString
+        if not prim.HasAPI(UsdPhysics.CollisionAPI) or not any(s in _p for s in _fkeys):
+            continue
+        try:
+            _m, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial("physics")
+            if _m and _m.GetPrim().IsValid():
+                _mp = UsdPhysics.MaterialAPI.Apply(_m.GetPrim())
+                _mp.CreateStaticFrictionAttr(_fmu)
+                _mp.CreateDynamicFrictionAttr(_fmu * 0.8)
+                PhysxSchema.PhysxMaterialAPI.Apply(
+                    _m.GetPrim()).CreateFrictionCombineModeAttr("max")
+            else:
+                UsdShade.MaterialBindingAPI.Apply(prim)
+                UsdShade.MaterialBindingAPI(prim).Bind(grip_mat, materialPurpose="physics")
+            n_floor += 1
+        except Exception:
+            pass
+    print(f">>> floor friction: mu {_fmu} on {n_floor} ground colliders "
+          f"(was ~0.7 effective; breakaway 10N vs the wrap's 14N thumb)", flush=True)
+    # De-instance the grasp colliders first or mu lands on nothing: a plain Traverse cannot see the
+    # colliders behind instance proxies, and a material cannot be authored on a proxy anyway.
+    _gkeys = ("finger", "Gripper", "palm", "pickup_obj")
+    _ganc = []
+    for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
+        _p = prim.GetPath().pathString
+        if not (prim.HasAPI(UsdPhysics.CollisionAPI) and any(k in _p for k in _gkeys)):
+            continue
+        if prim.IsInstanceProxy():
+            _a = prim
+            while _a and not _a.IsInstance():
+                _a = _a.GetParent()
             if _a and _a.IsInstance():
-                _a.SetInstanceable(False)
-        if _ganc:
-            print(f">>> mu: de-instanced {len(set(_ganc))} ancestors so the grasp colliders behind "
-                  f"instance proxies can carry the friction material", flush=True)
+                _ganc.append(_a.GetPath())
+    for _pp in set(_ganc):
+        _a = stage.GetPrimAtPath(_pp)
+        if _a and _a.IsInstance():
+            _a.SetInstanceable(False)
+    if _ganc:
+        print(f">>> mu: de-instanced {len(set(_ganc))} ancestors so the grasp colliders behind "
+              f"instance proxies can carry the friction material", flush=True)
 
     _reported = set()
     for prim in stage.Traverse():
@@ -659,42 +545,35 @@ def tune_physics(stage, robot_root):
                 any(s in path for s in ("finger", "Gripper", "palm", "pickup_obj"))):
             continue
         co = PhysxSchema.PhysxCollisionAPI.Apply(prim)
-        # Contact reporting on the hand itself. PhysX only raises contact events for actors carrying
-        # PhysxContactReportAPI, so with it on the objects alone every ledger can only see pairs
-        # containing a pickup object -- a finger jammed against the floor, the palm or its own
-        # neighbour raises no event at all.
+        # PhysX only raises contact events for actors carrying PhysxContactReportAPI, so with it on
+        # the objects alone a finger jammed against the floor or the palm raises nothing.
         _bp = prim
         while _bp and _bp.IsValid() and not _bp.HasAPI(UsdPhysics.RigidBodyAPI):
             _bp = _bp.GetParent()
-        if (_bp and _bp.IsValid() and _bp.GetPath() not in _reported
-                and os.environ.get("HAND_CONTACT_REPORT", "1") == "1"):
+        if _bp and _bp.IsValid() and _bp.GetPath() not in _reported:
             try:
                 PhysxSchema.PhysxContactReportAPI.Apply(_bp).CreateThresholdAttr(0.0)
                 _reported.add(_bp.GetPath())
             except Exception:
                 pass
-        # The contact offset is the grasp's shock absorber: contacts start being generated this far
-        # out, so a pad decelerates over a band instead of being discovered already overlapping.
+        # Contact offset 8mm: contacts start being generated this far out, so a pad decelerates over
+        # a band instead of being discovered already overlapping.
         co.CreateContactOffsetAttr(float(os.environ.get(
-            "CONTACT_OFF", "0.008" if GRIP_MODE == "perfect" else "0.02")))
-        # The rest offset models compliant PAD THICKNESS. The contact offset only decides where
-        # contacts are generated; force still needs compression past the rest offset, so at 0.0 a
-        # pad sitting a couple of millimetres off the surface carries exactly zero load -- and the
-        # fingers cannot close further, because they are already at their arc minimum.
-        _rest_def = "0.003" if os.environ.get("GRIP_MODE", "practical") == "perfect" else "0.0"
-        co.CreateRestOffsetAttr(float(os.environ.get("REST_OFF", _rest_def)))
-        # Torsional friction. The source gripper grips with condim="6" (tangential + torsional +
-        # rolling); the PhysX default is tangential-only, so the cylinder rolls out of the grip.
+            "CONTACT_OFF", "0.008")))
+        # Rest offset 3mm models compliant PAD THICKNESS: force needs compression past it, so at 0.0
+        # a pad sitting a couple of millimetres off the surface carries exactly zero load.
+        co.CreateRestOffsetAttr(float(os.environ.get("REST_OFF", "0.003")))
+        # Torsional friction: PhysX defaults to tangential-only and the cylinder rolls out of the grip.
         tpr = 0.04
         co.CreateTorsionalPatchRadiusAttr(tpr)
         co.CreateMinTorsionalPatchRadiusAttr(tpr)
         n_off += 1
-        # Force-binding our own material with `strongerThanDescendants` -- tried, failed, off by
-        # default.
         mat, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial("physics")
-        if mat and mat.GetPrim().IsValid():                  # raise friction on the material it uses
+        # raise friction on the material it uses
+        if mat and mat.GetPrim().IsValid():
             mp = UsdPhysics.MaterialAPI.Apply(mat.GetPrim())
-            mp.CreateStaticFrictionAttr(MU)                  # match MuJoCo finger friction="5 5 5"
+            # match MuJoCo finger friction="5 5 5"
+            mp.CreateStaticFrictionAttr(MU)
             mp.CreateDynamicFrictionAttr(MU * 0.8)
             mp.CreateRestitutionAttr(0.0)
             PhysxSchema.PhysxMaterialAPI.Apply(mat.GetPrim()).CreateFrictionCombineModeAttr("max")
@@ -723,27 +602,25 @@ def build_home_pose(names, current):
 
 
 def finger_pd(n):
-    """Finger dynamics carried over from the source model: (kp, kd, armature).
-
-    From the source actuator and joint definitions:
-        joint_1        actuator kp=100 kv=20  +  joint stiffness=10 damping=20  -> kd 40
-        joint_2/3      actuator kp=10  kv=6   +  joint stiffness=1  damping=10  -> kd 16
-        palm_finger_*  actuator kp=10  kv=6   +  joint stiffness=1  damping=10  -> kd 16
-    MuJoCo's kv and the joint's own damping both oppose absolute joint velocity, exactly as a
-    PhysX drive's kd does against its zero target velocity, so they add.  The passive joint
-    stiffness is deliberately NOT folded in: we command the RECORDED qpos, which already contains
-    whatever equilibrium that spring produced.
-
-    ARMATURE is the piece PhysX needs and the MJCF has no word for.  MuJoCo integrates damping
-    IMPLICITLY at 500Hz (`integrator="implicitfast"`), so kd=40 on a 1e-5 kg.m2 phalanx is fine
-    there.  At 240Hz a drive that stiff on that little inertia either rings (measured: j1
-    overshooting its command by 0.72 rad, then throwing the object) or, once you cap the torque to
-    stop the ringing, spends its whole budget on damping and sags to the joint limit (measured:
-    j1 pinned at -1.5708 = the -90deg limit while commanded to -0.21).  Reflected rotor inertia
-    fixes it and is PHYSICALLY REAL for this hand — a Robotiq 3F finger is worm-gear driven, and a
-    gearbox multiplies motor inertia by the square of its ratio.  armature ~ kd*dt keeps the
-    damping resolvable in one step.
-    """
+    """Finger drive gains from the source model: (kp, kd, armature). kd sums the actuator kv and the
+    joint's own damping, which both oppose joint velocity. ARMATURE is reflected gearbox inertia: at
+    240Hz these kd values on a ~1e-5 kg.m2 phalanx ring or sag to the limit without it."""
+    # VENDOR_GAINS=1: Tesollo's published Isaac drive gains -- orders of magnitude softer than the
+    # MuJoCo-derived numbers below, so contact saturates the drives into torque control.
+    if os.environ.get("VENDOR_GAINS", "0") == "1":
+        if "_joint_1_" in n:
+            kp = 1.9
+        elif "_joint_2_" in n:
+            kp = 0.82
+        elif "_joint_3_" in n:
+            kp = 0.53
+        else:                                   # palm_finger spread joints
+            kp = 0.23
+        # The vendor ships kd ~0 because the real hand's damping is mechanical (worm gear), which the
+        # sim does not model: vendor stiffness, our own gearbox inertia and damping.
+        _I = 0.25 if "_joint_1_" in n else 0.10
+        kd = 2.0 * (kp * _I) ** 0.5              # critically damped against the reflected inertia
+        return kp, kd, _I
     if n.startswith("palm_finger") or "_joint_2_" in n or "_joint_3_" in n:
         kp, kd = 10.0, 16.0
     else:
@@ -753,22 +630,50 @@ def finger_pd(n):
     return kp * g, kd * g, kd * g * marg / 240.0
 
 
-def hide_collision_visuals(stage):
-    """Hide the source model's collision-proxy geometry.
+_SHOW_COLLIDERS = os.environ.get("SHOW_COLLIDERS") == "1"
 
-    Visual only: PhysX collision is independent of USD visibility, so every collider still
-    collides exactly as before.
 
-    In the source MJCF these are debug shapes drawn in a toggleable geom group — the finger
-    contact pads (red blocks that otherwise appear poking out of the gripper) and a chassis
-    collision box (a green slab on the body). The importer has no notion of geom groups, so they
-    arrive as ordinary visible meshes.
-
-    They are identified by their authored display colour rather than by name, which survives
-    renaming and catches every copy across both arms.
-    """
-    if os.environ.get("HIDE_COLLISION_VIS", "1") != "1":
+def fit_battery_collider(stage):
+    """Grow the battery's collider by `BATTERY_FIT` mm on every face (default 5, the figure checked
+    in the GUI; `BATTERY_FIT=0` keeps the authored box). NOT to the mesh bbox: the terminals make
+    a bounds comparison read 26mm where the surfaces are short by ~5 (see FINDINGS)."""
+    _mm = os.environ.get("BATTERY_FIT", "5")
+    if not _mm or float(_mm) == 0.0:
+        print(">>> BATTERY_FIT=0: battery collider left as authored (5mm under the drawn body)",
+              flush=True)
         return
+    try:
+        grow = float(_mm) / 1000.0
+    except ValueError:
+        print(f">>> BATTERY_FIT: not a number ({_mm!r}) -- expected millimetres", flush=True)
+        return
+    # today's authored collider, base frame; grown uniformly rather than fitted to the mesh bbox
+    lo = np.array([-0.310, -0.290, 0.165]) - grow
+    hi = np.array([-0.030, 0.270, 0.305]) + grow
+    for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
+        p = str(prim.GetPath())
+        if not p.endswith("/LifePo4_12V50Ah/Box") or not prim.IsA(UsdGeom.Cube):
+            continue
+        par = UsdGeom.Xformable(prim.GetParent()).GetLocalTransformation()
+        off = np.array([par.ExtractTranslation()[i] for i in range(3)])
+        half, ctr = (hi - lo) * 0.5, (lo + hi) * 0.5 - off
+        _old = {o.GetOpName(): o for o in UsdGeom.Xformable(prim).GetOrderedXformOps()}
+        for _nm, _v in (("xformOp:scale", half), ("xformOp:translate", ctr)):
+            if _nm in _old:
+                _old[_nm].Set(Gf.Vec3f(*[float(x) for x in _v]) if "scale" in _nm
+                              else Gf.Vec3d(*[float(x) for x in _v]))
+        print(f">>> BATTERY_FIT: collider grown {grow * 1000:.1f}mm per face -> base frame "
+              f"{np.round(lo, 4).tolist()}..{np.round(hi, 4).tolist()} "
+              f"(height 140mm -> {(hi[2] - lo[2]) * 1000:.0f}mm); the boom's 19mm retreat clearance "
+              f"becomes {19.0 - grow * 1000:.1f}mm", flush=True)
+        return
+    print(">>> BATTERY_FIT: the battery collider prim was not found", flush=True)
+
+
+def hide_collision_visuals(stage):
+    """Hide the source model's collision-proxy geometry (red pad boxes, green chassis box). Visual
+    only: PhysX collision is independent of USD visibility. Matched by authored display colour, not
+    name, because the importer has no notion of the MJCF geom groups these were drawn in."""
     n = 0
     for prim in stage.Traverse(Usd.TraverseInstanceProxies()):
         img = UsdGeom.Imageable(prim)
@@ -781,15 +686,26 @@ def hide_collision_visuals(stage):
         pure_red = r > 0.9 and g < 0.1 and b < 0.1
         pure_green = g > 0.9 and r < 0.1 and b < 0.1
         if pure_red or pure_green:
+            if _SHOW_COLLIDERS:
+                # The check the planner cannot do for itself: these ARE the boxes it reasons about. Authored
+                # `purpose = "guide"`, which the viewport does not draw, so force it to default.
+                img.MakeVisible()
+                img.GetPurposeAttr().Set(UsdGeom.Tokens.default_)
+                try:
+                    UsdGeom.Gprim(prim).GetDisplayOpacityAttr().Set([0.35])
+                except Exception:                                     # noqa: BLE001 -- display only
+                    pass
+                n += 1
+                continue
             img.MakeInvisible()
             n += 1
-    print(f">>> hid {n} collision-proxy visuals (pad boxes + chassis collision box); "
-          f"HIDE_COLLISION_VIS=0 to show them", flush=True)
+    print(f">>> {'SHOWING' if _SHOW_COLLIDERS else 'hid'} {n} collision-proxy visuals "
+          f"(pad boxes + chassis collision box)", flush=True)
 
 
 def set_finger_armature(stage, arm="_1"):
-    """Author physxJoint:armature on every arm-1 finger joint.  Must run at LOAD (before the
-    articulation is built) — it is a solver property of the joint, not a runtime gain."""
+    """Author physxJoint:armature on every arm-1 finger joint. Must run at LOAD, before the
+    articulation is built: it is a solver property of the joint, not a runtime gain."""
     n = 0
     for prim in stage.Traverse():
         nm = prim.GetName()
@@ -798,7 +714,16 @@ def set_finger_armature(stage, arm="_1"):
         if not prim.IsA(UsdPhysics.RevoluteJoint):
             continue
         _, _, a = finger_pd(nm)
-        PhysxSchema.PhysxJointAPI.Apply(prim).CreateArmatureAttr(a)
+        _jp = PhysxSchema.PhysxJointAPI.Apply(prim)
+        _jp.CreateArmatureAttr(a)
+        # Joint friction expresses the worm gear's non-backdrivability (the mechanism holds position,
+        # which is why the vendor can ship kp ~1.9).
+        _jf = float(os.environ.get("FINGER_JOINT_FRICTION", "0"))
+        if _jf > 0:
+            try:
+                _jp.CreateJointFrictionAttr(_jf)
+            except Exception:
+                pass
         n += 1
     print(f">>> finger armature: {n} joints (j1 {finger_pd('finger_a_joint_1_1')[2]:.4f}, "
           f"j2/3 {finger_pd('finger_a_joint_2_1')[2]:.4f} kg.m2)", flush=True)
@@ -807,36 +732,34 @@ def set_finger_armature(stage, arm="_1"):
 def set_finger_contact_impulse(stage, arm="_1"):
     """Bound the impulse a FINGER PAD contact may deliver, per pad body.
 
-    physxRigidBody:maxContactImpulse is authored on the OBJECT elsewhere, but PhysX applies it to
-    every contact that body has — including the floor, which needs at least m*g/dt = 0.042 N.s to
-    hold the cylinder up.  So the object-side value cannot be lowered to a grip-sized force without
-    the object sinking through the floor.  PhysX takes the MINIMUM of the two bodies' values, so
-    authoring it on the pads instead bounds pad contacts alone and leaves the floor untouched.
-
-    Sizing: holding 1.025kg by friction with mu=4.0 needs only m*g/(2*mu) = 1.3N per side, while a
-    300mm-tall r=80mm cylinder TIPS above m*g*r/h = 5.4N.  Measured pad loads were 10-96N, i.e. 2-18x
-    the tipping limit — that is what walked the object 23-66mm in every trial, not a lack of
-    friction (floor and object are already static=5.0 dynamic=4.0).  Default 0.02 N.s = 4.8N at
-    240Hz: above the 1.3N needed, below the 5.4N that tips."""
-    imp = 0.0
+    The same cap on the OBJECT applies to all its contacts, including the floor, which needs m*g/dt
+    to hold it up; PhysX takes the MINIMUM of a pair's caps, so authoring it on the pads bounds pad
+    contacts alone. Size above the friction need m*g/(2*mu) per side, below tipping m*g*r/h."""
+    imp = float(os.environ.get("FINGER_IMPULSE", "0.0"))
     if imp <= 0:
         return
-    n = 0
+    # The PALM matches neither prefix but carries most of the force; PALM_IMPULSE overrides it alone.
+    palm_imp = float(os.environ.get("PALM_IMPULSE", imp))
+    n = n_palm = 0
     for prim in stage.Traverse():
         nm = prim.GetName()
-        if not (nm.startswith(("finger_", "palm_finger")) and nm.endswith(arm)):
+        is_palm = nm == "Gripper_Link3" + arm
+        if not (is_palm or (nm.startswith(("finger_", "palm_finger")) and nm.endswith(arm))):
             continue
         if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
             continue
-        PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateMaxContactImpulseAttr(imp)
+        PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateMaxContactImpulseAttr(
+            palm_imp if is_palm else imp)
+        n_palm += is_palm
         n += 1
-    print(f">>> finger contact impulse: {n} pad bodies capped at {imp} N.s "
-          f"({imp * 240:.1f}N at 240Hz)", flush=True)
+    print(f">>> grasp contact impulse: {n} bodies capped at {imp} N.s "
+          f"({imp * 240:.1f}N at 240Hz)"
+          + (f", palm at {palm_imp} N.s ({palm_imp * 240:.1f}N)" if n_palm else
+             "  -- PALM NOT FOUND, it stays uncapped"), flush=True)
 
 
 def set_arm_gains(robot, names):
-    """The MJCF importer skips drive gains on the arm Column/Arm actuators -> set PD
-    gains (re-tuned from scratch on PhysX). Wheels/rollers stay free."""
+    """Set the PD gains the MJCF importer skips on the arm Column/Arm actuators; wheels stay free."""
     ndof = len(names)
     kp = np.full(ndof, 2.0e3)
     kd = np.full(ndof, 2.0e2)
@@ -848,27 +771,22 @@ def set_arm_gains(robot, names):
             kp[i], kd[i] = 1.0e3, 1.0e2
             if n.startswith(("finger_", "palm_finger")):
                 kp[i], kd[i], _ = finger_pd(n)
-                # A finger phalanx has inertia ~1e-5 kg.m2, so at 240Hz a position drive is stable
-                # only up to about 0.6 Nm/rad before damping.
-
-                # Force-limited squeeze: the PD saturates at this torque, so the fingers press with
-                # a bounded force instead of the default unlimited drive, which punches through
-                # contacts.
+                # squeeze torque ceiling: the PD saturates here rather than punching through contacts
                 eff[i] = 1.0e6
         elif "rolling_joint" in n or "slipping" in n:
-            kp[i], kd[i] = 0.0, 1.0
+            # Mecanum rollers and unbraked wheel hubs. kd comes from the implicit-drive stability bound, not
+            # from feel. `RobotMixin._wheel_gain` reads the same variable with the same default.
+            kp[i], kd[i] = 0.0, float(os.environ.get("ROLLER_KD", "0.02"))
     ctrl = robot.get_articulation_controller()
     ctrl.set_gains(kp, kd)
-    if os.environ.get("EFFORT_LIMIT", "1") == "1":
-        try:
-            ctrl.set_max_efforts(eff)
-        except Exception as e:
-            print(f">>> set_max_efforts unavailable: {e}", flush=True)
+    try:
+        ctrl.set_max_efforts(eff)
+    except Exception as e:
+        print(f">>> set_max_efforts unavailable: {e}", flush=True)
 
 
 def reveal_viewport(world, simulation_app):
-    """Re-enable viewport updates after the scene is fully built AND scattered AND parked, warming
-    the renderer a few frames so it appears finished in one shot (not body-by-body, not mid-scatter)."""
+    """Re-enable viewport updates and warm the renderer so the scene appears finished in one shot."""
     _vp = getattr(world, "_frozen_vp", None)
     if _vp is None:
         return
@@ -882,14 +800,22 @@ def reveal_viewport(world, simulation_app):
 
 
 def load_scene(simulation_app, name="morph"):
-    """Full setup: reference the world USD, apply converter fixups + lighting + floor +
-    textured products, add the robot, set gains, park it. Returns (world, robot, names, q0)."""
+    """Reference the world USD, apply fixups, lighting, floor and products, add the robot, set gains
+    and park it. Returns (world, robot, names, q0)."""
     if not os.path.exists(USD):
         raise SystemExit(f"USD not found: {USD}\nRun import_world.py first.")
-    world = World(stage_units_in_meters=1.0)
+    # physics_dt == rendering_dt, so a HEADED step is ONE physics step. At the default rendering_dt
+    # a rendered call advances four substeps and every per-step law runs fast.
+    world = World(stage_units_in_meters=1.0, physics_dt=1.0 / 240, rendering_dt=1.0 / 240)
+    # PhysX's stabilization pass suppresses jitter in RESTING contacts, and a held grasp is one.
+    try:
+        world.get_physics_context().enable_stablization(True)
+        print(">>> physx: stabilization ENABLED (resting-contact jitter suppression)",
+              flush=True)
+    except Exception as _e_stab:
+        print(f">>> physx: stabilization unavailable ({_e_stab})", flush=True)
     # Frame the camera the moment the world exists: before `World()` it is a silent no-op, because
-    # there is no viewport yet. Bodies rendering black during the load are RTX warm-up, and
-    # cosmetic.
+    # there is no viewport yet.
     _vp = None
     if os.environ.get("ISAAC_HEADLESS") != "1":
         try:
@@ -898,13 +824,12 @@ def load_scene(simulation_app, name="morph"):
         except Exception:
             pass
         # Do not show the scene assembling: bodies render black until their MDL materials compile.
-        if os.environ.get("PRESENT_WHEN_LOADED", "1") == "1":
-            try:
-                from omni.kit.viewport.utility import get_active_viewport
-                _vp = get_active_viewport()
-                _vp.updates_enabled = False
-            except Exception:
-                _vp = None
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+            _vp = get_active_viewport()
+            _vp.updates_enabled = False
+        except Exception:
+            _vp = None
     add_reference_to_stage(usd_path=USD, prim_path="/World")
     while is_stage_loading():
         simulation_app.update()
@@ -919,19 +844,27 @@ def load_scene(simulation_app, name="morph"):
         raise SystemExit("No ArticulationRootAPI prim found in imported USD.")
     print(f">>> articulation root: {root}", flush=True)
     apply_link_masses(world.stage, root)
-    if os.environ.get("NO_LOOP", "0") != "1":               # NO_LOOP=1: skip the loop joint (for a fully-
-        close_arm_loop(world.stage, root)                   # kinematic arm — the loop constraint fights forcing)
+    # NO_LOOP=1: kinematic arm; the loop
+    if os.environ.get("NO_LOOP", "0") != "1":
+        # constraint fights joint forcing
+        close_arm_loop(world.stage, root)
     else:
         print(">>> NO_LOOP: skipping close_arm_loop (kinematic arm mode)", flush=True)
-    if os.environ.get("PAD_COLLIDER", "1") == "1":          # real-mesh finger pads (vs the thin under-covering boxes)
-        fix_finger_collision(world.stage, root)
-    if os.environ.get("OBJ_RADIUS"):                        # reshape objects to a graspable size (isaac-only, runtime)
+    # real-mesh finger pads (vs the thin under-covering boxes)
+    fix_finger_collision(world.stage, root)
+    # reshape objects to a graspable size (isaac-only, runtime)
+    if os.environ.get("OBJ_RADIUS"):
         resize_object(world.stage, float(os.environ["OBJ_RADIUS"]),
                       float(os.environ["OBJ_HALF_H"]) if os.environ.get("OBJ_HALF_H") else None)
     tune_physics(world.stage, root)
-    set_finger_armature(world.stage)          # reflected gearbox inertia (see finger_pd)
-    set_finger_contact_impulse(world.stage)   # bound PAD force without throttling the floor
-    hide_collision_visuals(world.stage)       # red pad boxes / green chassis box — visual only
+    # reflected gearbox inertia (see finger_pd)
+    set_finger_armature(world.stage)
+    # bound PAD force without throttling the floor
+    set_finger_contact_impulse(world.stage)
+    # BATTERY_FIT=1: collider -> the drawn mesh
+    fit_battery_collider(world.stage)
+    # red pad boxes / green chassis box — visual only
+    hide_collision_visuals(world.stage)
 
     robot = world.scene.add(Robot(prim_path=root, name=name))
     world.reset()
@@ -941,9 +874,8 @@ def load_scene(simulation_app, name="morph"):
     q0 = build_home_pose(names, robot.get_joint_positions())
     robot.set_joint_positions(q0)
     print(f">>> {len(names)} DOFs, robot parked", flush=True)
-    # Do not reveal here: the object scatter and the arm park both happen in `Demo.__init__`, after
-    # this returns, so revealing now shows the initial line-up and then the scatter and park
-    # happening live.
+    # Reveal later, not here: the scatter and the arm park happen in `Demo.__init__` after this
+    # returns, and would otherwise be shown happening live.
     world._frozen_vp = _vp
 
     return world, robot, names, q0

@@ -5,14 +5,26 @@
 # launch: it starts the sim, watches the log for "app ready", and if the boot hangs it kills and
 # retries -- then, once booted, streams the sim's output so it behaves like a normal foreground run.
 #
-#   ./run_gui.sh                      # practical mode (default): the verified demo
-#   GRIP_MODE=perfect ./run_gui.sh    # perfect mode: real pad friction, does not lift yet
+#   ./run_gui.sh                      # friction-only pick and place -- the only mode
+#   ARM_PLANNER=0 ./run_gui.sh        # skip the planned reach (nothing is flown in its place)
 #
-# Any other environment variable can be passed on the front of the command as usual.
+# NO TUNING FLAGS ARE NEEDED. Every value the verified cycles were measured with is a default in
+# morph/config.py (PROFILE), and drive mode is on by default. Verified 2026-09-06 on defaults alone: object 0 to
+# slot 4, three pads 10.25/8.08/8.12 N, lift +249 mm, released 3.0 mm, placed 4 mm, ALL CHECKS PASS
+# — identical to the long runbook command it replaces. `ARM_DRIVE=0` restores the kinematic path.
+#
+# Any other environment variable can still be passed on the front of the command; an explicit value
+# always beats a default.
 ISAAC="${ISAAC:-$HOME/isaac-sim/python.sh}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export OMPL_PYTHON="${OMPL_PYTHON:-$HERE/.venv/bin/python3}"
+# RRTConnect resamples every run. Pinned here for the same reason NAV_SEED is: two runs of the same
+# cycle should take the same route. Unset it for genuinely independent runs.
+export ARM_SEED="${ARM_SEED:-1}"
 LOG="${MORPH_LOG:-$HERE/logs/live.log}"
+# play_isaac defaults this to logs/place_results.json and verify_place looks next to the LOG, so
+# under MORPH_LOG the writer and the reader use different files. Pin both to this run's log dir.
+export PLACE_RESULTS="${PLACE_RESULTS:-$(dirname "$LOG")/place_results.json}"
 mkdir -p "$(dirname "$LOG")"          # logs/ is gitignored; override with MORPH_LOG
 for attempt in 1 2 3 4; do
   # sweep stale carb shm from dead owners (and the global sem) before booting
@@ -23,7 +35,8 @@ for attempt in 1 2 3 4; do
   : > "$LOG"
   # NOT setsid: keep it in this terminal's process group so Ctrl-C reaches it. Trap INT to kill the
   # sim (and the tail) on Ctrl-C -- the earlier setsid version detached it and Ctrl-C did nothing.
-  env NAV_SEED="${NAV_SEED:-0}" PYTHONUNBUFFERED=1 "$ISAAC" "$HERE/play_isaac.py" >> "$LOG" 2>&1 < /dev/null &
+  env NAV_SEED="${NAV_SEED:-0}" PYTHONUNBUFFERED=1 \
+    "$ISAAC" "$HERE/play_isaac.py" >> "$LOG" 2>&1 < /dev/null &
   PID=$!
   trap 'kill -INT $PID 2>/dev/null; sleep 1; kill -9 $PID 2>/dev/null; exit 130' INT
   ok=0

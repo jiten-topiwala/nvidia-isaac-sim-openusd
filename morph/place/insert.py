@@ -1,60 +1,73 @@
 """The place insert: raise, const-z slide, lower -- one module per stage, as `morph/pick/` is.
-
-Extracted from the single flat `place.py`, whose `place()` had grown to hold a ~200-line nested
-`insert_sequence` closure containing a further three closures. The behaviour is unchanged; only the
-nesting is. Imports Isaac APIs at module level; only importable after SimulationApp.
+Imports Isaac APIs at module level; only importable after SimulationApp.
 """
 import math
 import os
 
 import numpy as np
 
-from morph.config import HEADLESS, COLUMN_MAX, A1_MAX
+from morph.arm.api import ArmModel, move_linear, sweep_top
+from morph.config import COLUMN_MAX, A1_MAX
+
+
+# Consecutive steps a gated joint may sit past its tracking tolerance before the servo gives up.
+# A single step is the transient every new motion produces; 24 is 0.1 s at 240 Hz.
+_SERVO_FOLLOW_STEPS = 24
 
 
 class InsertStage:
     """One stage of `place`. Mixed into `PlaceMixin`; all `self.*` belong to `Demo`."""
 
-    def _ramp(self, q_from, q_to, secs, hold_fn):
+    def _hand_top_model(self, q):
+        """Hand-top world z the ARM MODEL gives for joint vector `q` WITHOUT commanding it; None if
+        the model cannot be evaluated. Carries the live wrist joints through, because the hand box's
+        reach above its origin depends on wrist orientation (why `sweep_top` is per sample)."""
+        try:
+            m = self._arm_model()
+            q8 = np.array([float(q[self.idx[n]]) for n in m.Q8], float)
+            p, R = m.fk(q8)[m.hand_link]
+            bt, bR = self._arm_base_world()
+            bt, bR = np.asarray(bt, float), np.asarray(bR, float)
+            return float((bt + bR @ p)[2]) + sweep_top(bR @ R)
+        except Exception:
+            return None
+
+    def _contact_watch(self, tag):
+        """Per-step watch for the column ramps: a forced arm fighting a static shelf board NaNs
+        SILENTLY, so the live contacts are the only warning. Handed to `move_linear` as `on_step`
+        because the primitive owns the write loop now."""
+        state = {"k": 0}
+
+        def _watch():
+            state["k"] += 1
+            if state["k"] % 30 == 0 and getattr(self, "_ctc_any", None):
+                print(f">>>   CONTACT during {tag}[{state['k']}]: "
+                      f"{dict(sorted(self._ctc_any.items(), key=lambda kv: 'pickup_obj' in kv[0])[:6])}",
+                      flush=True)
+
+        return _watch
+
+    def _seat_step(self, q_from, q_to, secs, hold_fn):
+        """Cosine-eased joint write for the seating servo: one small increment, then the loop reads
+        the object again. NOT a planned motion -- the servo presses INTO the board it would be
+        checked against, so there is nothing here to collision-check, and the planned column ramps
+        went to `move_linear`."""
         n = max(1, int(secs / self.dt))
         q = np.asarray(q_from, float).copy()
         for k in range(n):
             f = 0.5 - 0.5 * math.cos(math.pi * (k + 1) / n)
             q = q_from + f * (np.asarray(q_to, float) - q_from)
             hold_fn(q)
-            # Contact watch. A kinematically forced arm fighting a static shelf board is the
-            # documented NaN mode, and it is invisible unless the contact ledger is read before the
-            # numbers stop being numbers.
-            if k % 30 == 0:
-                if getattr(self, "_ctc_any", None):
-                    print(f">>>   CONTACT during ramp[{k}]: "
-                          f"{dict(list(self._ctc_any.items())[:6])}", flush=True)
-                    self._ctc_any = {}
-                _rp = np.asarray(self.robot.get_world_pose()[0], float)
-                if not np.all(np.isfinite(_rp)) and not getattr(self, "_nan_said", False):
-                    self._nan_said = True
-                    print(f">>>   NON-FINITE at ramp step {k}/{n}: root {_rp}", flush=True)
+            if k % 30 == 0 and getattr(self, "_ctc_any", None):
+                print(f">>>   CONTACT during seat[{k}]: "
+                      f"{dict(sorted(self._ctc_any.items(), key=lambda kv: 'pickup_obj' in kv[0])[:6])}",
+                      flush=True)
         return q
 
-    def _insert_sequence(self, obj, goal_xyz, clear, hold_fn):
-        """Raise, slide at constant height, then lower -- three phases, not one move.
-
-        The slide runs at a fixed height above the shelf and the lower is separate, because a
-        single diagonal move can pass the carried object THROUGH a shelf plate on the way in.
-        Solving one pose and ramping reach, height and yaw together is exactly that diagonal, and
-        it also lands further off target than a plain servo does.
-
-        Reach and height are coupled through the tilt (straightening dh 0.110 -> 0.000 gains
-        190mm of reach and 440mm of height together), so the SLIDE cannot be serviced
-        incrementally -- it is solved with `_solve_reach_z`, which picks the (dh, a1, h1) that
-        hits the wanted reach AT the slide height. RAISE and LOWER are columns-only, where the
-        coupling does not arise at all.
-
-        The grip->object offset is carried through the turret rotation: it is fixed in the HAND
-        frame, so a solve that turns th by dth rotates it by dth about world z. Aiming with the
-        pre-rotation offset is what made the earlier attempt miss; iterate the solve twice so
-        the offset used matches the th it produces.
-        """
+    def _insert_sequence(self, obj, goal_xyz, clear, hold_fn, obj_idx=None):
+        """Raise, slide at constant height, then lower -- three phases, never one diagonal, which
+        would pass the carried object THROUGH a shelf plate. The SLIDE extends a1 at frozen dh, or
+        else one `_solve_reach_z` (tilt couples reach and z); raise/lower are columns-only."""
         ih1, ih2 = self.idx["ColumnLeftBearingJoint_1"], self.idx["ColumnRightBearingJoint_1"]
         ia1, ith = self.idx.get("ArmLeftJoint_1"), self.idx.get("BaseJoint_1")
         if ia1 is None or ith is None or self.clut is None:
@@ -67,35 +80,38 @@ class InsertStage:
             q = np.asarray(self.robot.get_joint_positions(), float).copy()
             return (q, float(q[ih1]), float(q[ih2]), float(q[ia1]), float(q[ith]))
 
-        def _off_world():          # object minus LUT grip point, in world
+        # object minus LUT grip point, in world
+        def _off_world():
             q, h1, h2, a1, th = _pose()
             return np.asarray(obj.get_world_poses()[0][0], float) - self._grip_fk(h1, h2, a1, th)
 
-        # ---- phase 1: RAISE to the slide height, columns only (reach and yaw untouched) ----
-        q, h1, h2, a1, th = _pose()
+        # The object stays an obstacle to every link except the hand holding it. `move_linear`
+        # builds the set from these names and refuses the motion itself if it cannot.
+        _grasp = () if obj_idx is None else (f"pickup_obj_{obj_idx}",)
+
+        # phase 1: RAISE to the slide height, columns only (reach and yaw untouched)
         dz = slide_z - float(np.asarray(obj.get_world_poses()[0][0], float)[2])
-        q_t = q.copy()
-        q_t[ih1] = float(np.clip(h1 + dz, 0.0, COLUMN_MAX))
-        q_t[ih2] = float(np.clip(h2 + dz, 0.0, COLUMN_MAX))
-        q = self._ramp(q, q_t, 1.0, hold_fn)
+        with self._time_stage('raise'):
+            # `fingers=None` keeps what this check has always judged, the SWEPT finger box. The commanded
+            # pads are a smaller hand, so adopting them here would loosen the check mid-descent.
+            _mv = move_linear(self, np.array([0.0, 0.0, dz]), "base", secs=1.0,
+                              allow_contact_with=_grasp, fingers=None, tag="raise",
+                              on_step=self._contact_watch("raise"))
+        q = _mv.q_end if _mv else None
+        if q is None:
+            print(f">>> insert[raise]: {_mv.reason}", flush=True)
+            self._safety_abort = True
+            self._insert_refused = True
+            print(">>> insert[raise]: refused -- holding the last cleared pose, grip not released",
+                  flush=True)
+            return None
         print(f">>> insert[raise]: object z -> "
               f"{float(np.asarray(obj.get_world_poses()[0][0], float)[2]):.3f} "
               f"(slide height {slide_z:.3f}, clearance {clear * 1000:.0f}mm over the slot)",
               flush=True)
 
-        # ---- phase 2: const-z slide -- one continuous a1 extension, boom tilt FROZEN ---- Two
-        # structural rules, both of which a waypoint solve violates:
-        #   1. Prefer reaching the height WITHOUT tilt. A cost-based solve straightens the boom on
-        # every
-        #      slide because its cost function likes it, when the reach it needs is available at the
-        #      current tilt from a1 alone -- and every tilt change pitches the hand, forcing mid-
-        # slide
-        #      wrist re-levels. Freeze dh, and fall back to a solved tilt only when a1 maxed at the
-        #      frozen dh cannot reach.
-        #   2. The motion has to be smooth. With dh frozen the hand attitude is constant, so z can
-        # be held
-        #      ANALYTICALLY per step from the LUT (h1 = C - lut_z(dh, a1)): one cosine ramp of a1,
-        #      columns compensating exactly -- no waypoints, no pauses, no mid-slide levelling.
+        # phase 2: const-z slide -- one continuous a1 extension with the boom tilt FROZEN, so the hand
+        # attitude is constant and z is held analytically per step from the LUT.
         _bx, _by, _byaw = self.base_ledger()
         q, h1, h2, a1, th = _pose()
         dh0 = h2 - h1
@@ -106,7 +122,8 @@ class InsertStage:
         fx = c * dx - s_ * dy
         mx, my = self.clut["mount"][0], self.clut["mount"][1]
 
-        def _reach_rot(dh_, a1_):        # chassis-forward reach of the grip at this shape
+        # chassis-forward reach of the grip at this shape
+        def _reach_rot(dh_, a1_):
             p_ = self._lut_interp(self.clut["grip"], dh_, a1_, 3)
             px_, py_ = float(p_[0]) - mx, float(p_[1]) - my
             return mx + math.cos(th) * px_ - math.sin(th) * py_
@@ -116,10 +133,8 @@ class InsertStage:
         if _reach_rot(dh0, a1max) >= fx - 1e-3:
             # reach is monotonic in a1 along a dh row
             a1_f = self._bisect_a1(lambda a: _reach_rot(dh0, a) >= fx, min(a1, a1max), a1max)
-            # Second feasibility gate: COLUMN HEADROOM, not just reach. On the high slot the
-            # untilted plan ends past the column stop, the loop's clip then silently crushes dh
-            # while the forced passives are still written for the old value, and the inconsistent
-            # linkage NaNs the articulation.
+            # Second feasibility gate: COLUMN HEADROOM, not just reach. Past the stop the clip
+            # crushes dh while the forced passives carry the old value, and the linkage NaNs.
             _h1_f = C_pre = h1 + self._lut_z(dh0, a1) - self._lut_z(dh0, a1_f)
             if _h1_f + dh0 > COLUMN_MAX - 0.01:
                 print(f">>> insert[slide]: column headroom EXHAUSTED at the frozen dh -- h2 would "
@@ -130,7 +145,7 @@ class InsertStage:
             print(f">>> insert[slide]: UNTILTED -- a1 {a1:.3f} -> {a1_f:.3f} reaches {fx:.3f}m at "
                   f"the frozen dh {dh0:+.3f}; no boom change, one continuous ramp", flush=True)
         if a1_f is None:
-            sol = self._solve_reach_z(fx, float(g_w[2]), 0.0, dh_ref=dh0, a1_max=a1max,
+            sol = self._solve_reach_z(fx, float(g_w[2]), dh_ref=dh0, a1_max=a1max,
                                       th=th, a1_ref=a1, h1_ref=h1)
             if sol is None:
                 print(f">>> insert[slide]: NO SOLVE -- reach {fx:.3f}m is outside the arm envelope "
@@ -142,14 +157,11 @@ class InsertStage:
                   f"{_reach_rot(dh0, a1max):.3f}m of the needed {fx:.3f}m, so dh {dh0:+.3f} -> "
                   f"{dh_f:+.3f} (the exception, not the default)", flush=True)
         C = h1 + self._lut_z(dh0, a1)                      # z invariant: h1 + lut_z is the grip height
-        # ...for the GRIP. The OBJECT hangs a pitch-dependent offset below it, so when the tilt
-        # fallback ramps dh the object walks off the line even with a perfect grip invariant and
-        # perfect passives.
+        # ...for the GRIP; the OBJECT hangs a pitch-dependent offset below it, so a dh ramp walks
+        # it off the line even with the grip invariant exact.
         _C_corr = 0.0
-        # The turret correction rides the slide instead of firing after it. The slide lands a
-        # repeatable lateral miss -- the dock is aimed from the BAKED grip frame while the analytic
-        # slide ends in a different arm shape -- and closing it afterwards fires the turret last, at
-        # the moment of placing.
+        # The turret correction rides the slide; closing the lateral miss afterwards would swing
+        # the turret at the moment of placing.
         _th_corr = _a1_corr = _a1_ext = 0.0
         _ith = self.idx.get("BaseJoint_1")
         _J = None
@@ -159,121 +171,226 @@ class InsertStage:
                 _qpr = np.asarray(self.robot.get_joint_positions(), float).copy()
                 _base = float(_qpr[_ji])
                 _qpr[_ji] = _base + _amt
-                self._force(_qpr); self._apply(_qpr); self._pin_grip(obj)
+                self._force(_qpr); self._apply(_qpr)
                 self.world.step(render=False)
                 _g = (np.asarray(obj.get_world_poses()[0][0], float)[:2] - _o0) / _amt
                 _qpr[_ji] = _base
-                self._force(_qpr); self._apply(_qpr); self._pin_grip(obj)
+                self._force(_qpr); self._apply(_qpr)
                 self.world.step(render=False)
                 return _g
             try:
-                _Jm = np.column_stack([_probe(ia1, 0.02), _probe(_ith, 0.02)])   # [d/da1, d/dth]
-                if abs(float(np.linalg.det(_Jm))) > 1e-4:                        # well-conditioned
+                if self._drive_on():
+                    # On drives a one-step probe barely moves the object: use the FK, not a probe.
+                    _q0j, _h1j, _h2j, _a1j, _thj = _pose()
+                    _pj = self._grip_fk(_h1j, _h2j, _a1j, _thj)
+                    _Jm = np.column_stack([(self._grip_fk(_h1j, _h2j, _a1j + 1e-3, _thj) - _pj)[:2] / 1e-3,
+                                           (self._grip_fk(_h1j, _h2j, _a1j, _thj + 1e-3) - _pj)[:2] / 1e-3])
+                else:
+                    _Jm = np.column_stack([_probe(ia1, 0.02), _probe(_ith, 0.02)])   # [d/da1, d/dth]
+                # well-conditioned
+                if abs(float(np.linalg.det(_Jm))) > 1e-4:
                     _J = np.linalg.inv(_Jm)
             except Exception:
                 _J = None
         n = max(2, int(2.0 / self.dt))
         _samp = max(1, n // 6)
-        for k in range(n):
-            f = 0.5 - 0.5 * math.cos(math.pi * (k + 1) / n)
-            a1_k = a1 + f * (a1_f - a1)
-            dh_k = dh0 + f * (dh_f - dh0)
-            _step_c = float(np.clip(_C_corr, -5e-4, 5e-4))
-            C += _step_c
-            _C_corr -= _step_c
-            if _J is not None:
-                _st = float(np.clip(_th_corr, -3e-4, 3e-4))
-                th += _st
-                _th_corr -= _st
-                q[_ith] = th
+        _ht_max = float("-inf")     # the whole-slide maximum the arm-clear gate reads
+        # `_ub` is the underside of the board above THIS slot: the slide may not command a pose whose
+        # predicted hand top passes it. None means the goal is not a rack slot, so there is no board.
 
-            h1_k = float(np.clip(C - self._lut_z(dh_k, a1_k), 0.0, COLUMN_MAX))
-            q[ih1] = h1_k
-            q[ih2] = float(np.clip(h1_k + dh_k, 0.0, COLUMN_MAX))
-            q[ia1] = a1_k
-            # The passives must follow the closure, or the model is fiction. Writing only the
-            # columns and a1 leaves the four passive four-bar joints frozen at the entry shape,
-            # which is survivable while dh is frozen -- but the moment the tilt fallback ramps dh
-            # they stop satisfying the closure, the real hand falls away from the LUT model, and the
-            # inconsistent linkage NaNs the articulation.
-            for _pn, _pv in self._closure_passives(dh_k, a1_k).items():
-                if _pn in self.idx:
-                    q[self.idx[_pn]] = float(_pv)
-            hold_fn(q)
-            if (k + 1) % _samp == 0:                 # verify_place.py samples: same fields/format
-                _zo_k = float(np.asarray(obj.get_world_poses()[0][0], float)[2]) - slide_z
-                # highest arm part inside the rack -- logged so the checker can GATE arm-vs-board
-                # clearance, not just the object's
-                _hz_k = float(self._hand_frame()[0][2])
-                _C_corr = -_zo_k                     # object error -> column correction budget
+        # the rack owns its own geometry
+        from morph.config import ARM_CLEAR_MARGIN, board_above
+        _ub = board_above(goal_xyz)
+        _ht_bound = None if _ub is None else _ub - ARM_CLEAR_MARGIN
+        _ht_bias, _ht_m, _ht_seen = 0.0, None, 0
+        if _ht_bound is not None:
+            # Anchor the model on the MEASURED hand: the prediction then carries only the model's
+            # error over one step, not its absolute offset from the live arm.
+            _ht_m = self._hand_top_model(q)
+            if _ht_m is not None:
+                _hp0, _hR0 = self._hand_frame()
+                _ht_bias = float(_hp0[2]) + sweep_top(_hR0) - _ht_m
+            print(f">>> insert[slide]: hand-top guard ARMED at {_ht_bound:.3f} "
+                  f"({_ub:.3f} board underside less {ARM_CLEAR_MARGIN * 1000:.0f}mm), model "
+                  f"anchored on the measured hand at {_ht_bias * 1000:+.0f}mm"
+                  if _ht_m is not None else
+                  f">>> insert[slide]: hand-top guard OFF -- the arm model would not evaluate, so "
+                  f"nothing predicts the {_ht_bound:.3f} bound this slide is under", flush=True)
+        with self._time_stage("slide"):
+            for k in range(n):
+                f = 0.5 - 0.5 * math.cos(math.pi * (k + 1) / n)
+                a1_k = a1 + f * (a1_f - a1)
+                dh_k = dh0 + f * (dh_f - dh0)
+                _step_c = float(np.clip(_C_corr, -5e-4, 5e-4))
+                C += _step_c
+                _C_corr -= _step_c
                 if _J is not None:
-                    # Lateral from the measured probe. Correcting FORWARD the same way was tried and
-                    # regressed: early in the ramp the xy error still contains the travel the plan
-                    # has yet to cover, so a straight error-null double-counts it.
-                    _err_k = np.asarray(obj.get_world_poses()[0][0], float)[:2] - goal_xyz[:2]
-                    _gt = _Jm[:, 1]
-                    _th_corr = float(np.clip(-float(_err_k @ _gt) / float(_gt @ _gt), -0.30, 0.30))
-                # Re-solve the a1 endpoint against the LIVE th. `a1_f` was bisected once against the
-                # ENTRY th, but the turret correction moves th and reach is measured through it, so
-                # the endpoint goes stale and the push overshoots before the trim hauls a1 back.
-                if a1_f is not None and _J is not None:
-                    if _reach_rot(dh_f, a1max) >= fx - 1e-3:
-                        a1_f = self._bisect_a1(lambda a: _reach_rot(dh_f, a) >= fx,
-                                               min(a1_k, a1max), a1max, iters=30)
-                print(f">>> insert[slide] wp {(k + 1) // _samp}/6: reach -> "
-                      f"{_reach_rot(dh_k, a1_k):.3f}m (final {fx:.3f}, z off slide "
-                      f"{_zo_k * 1000:+.0f}mm) | dh {dh_k:+.3f}  a1 {a1_k:.3f}  "
-                      f"h1 {h1_k:.3f} -> {h1_k:.3f}  th {th:+.3f} held  hand z {_hz_k:.3f}",
-                      flush=True)
+                    _st = float(np.clip(_th_corr, -3e-4, 3e-4))
+                    th += _st
+                    _th_corr -= _st
+                    q[_ith] = th
+
+                h1_k = float(np.clip(C - self._lut_z(dh_k, a1_k), 0.0, COLUMN_MAX))
+                q[ih1] = h1_k
+                q[ih2] = float(np.clip(h1_k + dh_k, 0.0, COLUMN_MAX))
+                q[ia1] = a1_k
+                # The passives must follow the closure. Frozen at the entry shape they stop satisfying
+                # it the moment the tilt fallback ramps dh: the hand leaves the LUT model and NaNs.
+                for _pn, _pv in self._closure_passives(dh_k, a1_k).items():
+                    if _pn in self.idx:
+                        q[self.idx[_pn]] = float(_pv)
+                if _ht_bound is not None:
+                    _ht_m = self._hand_top_model(q)
+                    if _ht_m is not None:
+                        _ht_seen += 1
+                        if _ht_m + _ht_bias > _ht_bound:
+                            # HALT here: a backout is an unchecked reverse between two boards, and
+                            # going on would command the pose the check just refused.
+                            self._safety_abort = True
+                            self._insert_refused = True
+                            # no steps ran means no maximum: do not print one
+                            if k:
+                                print(f">>> insert[slide]: hand top max {_ht_max:.3f} over {k} steps "
+                                      f"(every step, up to the ABORT)", flush=True)
+                            print(f">>> insert[slide]: ABORTING before step {k + 1}/{n} -- the pose "
+                                  f"about to be commanded puts the hand top at "
+                                  f"{_ht_m + _ht_bias:.3f}, past the {_ht_bound:.3f} bound under the "
+                                  f"{_ub:.3f} board above this slot. Holding the last cleared pose; "
+                                  f"the object stays held, nothing is released.", flush=True)
+                            return None
+                hold_fn(q)
+                # The measurement, taken every step, is also what the next step's prediction is anchored on.
+                # `sweep_top` accounts for the wrist-orientation dependent offset above the hand origin.
+                _hp_k, _hR_k = self._hand_frame()        # highest arm part inside the rack
+                _hz_k = float(_hp_k[2])
+                _ht_k = _hz_k + sweep_top(_hR_k)
+                _ht_max = max(_ht_max, _ht_k)
+                if _ht_m is not None:
+                    _ht_bias = _ht_k - _ht_m
+                # verify_place.py samples: same fields/format
+                if (k + 1) % _samp == 0:
+                    _zo_k = float(np.asarray(obj.get_world_poses()[0][0], float)[2]) - slide_z
+                    _C_corr = -_zo_k                     # object error -> column correction budget
+                    if _J is not None:
+                        # Lateral only: nulling FORWARD error double-counts the travel still to come.
+                        _err_k = np.asarray(obj.get_world_poses()[0][0], float)[:2] - goal_xyz[:2]
+                        _gt = _Jm[:, 1]
+                        _th_corr = float(np.clip(-float(_err_k @ _gt) / float(_gt @ _gt), -0.30, 0.30))
+                    # Re-solve the a1 endpoint against the LIVE th: `a1_f` was bisected against the
+                    # ENTRY th, and reach is measured through th, so the turret trim staled it.
+                    if a1_f is not None and _J is not None:
+                        if _reach_rot(dh_f, a1max) >= fx - 1e-3:
+                            a1_f = self._bisect_a1(lambda a: _reach_rot(dh_f, a) >= fx,
+                                                   min(a1_k, a1max), a1max, iters=30)
+                    print(f">>> insert[slide] wp {(k + 1) // _samp}/6: reach -> "
+                          f"{_reach_rot(dh_k, a1_k):.3f}m (final {fx:.3f}, z off slide "
+                          f"{_zo_k * 1000:+.0f}mm) | dh {dh_k:+.3f}  a1 {a1_k:.3f}  "
+                          f"h1 {h1_k:.3f} -> {h1_k:.3f}  th {th:+.3f} held  hand z {_hz_k:.3f}  "
+                          f"hand top {_ht_k:.3f}",
+                          flush=True)
+        # The value verify_place's arm-clear gate reads. The `wp` lines above are a human's
+        # six-point view of this same slide; this is every step of it.
+        print(f">>> insert[slide]: hand top max {_ht_max:.3f} over {n} steps (every step; the wp "
+              f"lines above are {n // _samp} samples)", flush=True)
+        if _ht_bound is not None:
+            print(f">>> insert[slide]: hand-top guard cleared {_ht_seen}/{n} steps against "
+                  f"{_ht_bound:.3f}"
+                  + ("" if _ht_seen == n else " -- the rest went UNPREDICTED"), flush=True)
         op = np.asarray(obj.get_world_poses()[0][0], float)
         print(f">>> insert[slide]: object -> {np.round(op, 3).tolist()} at the slide height "
               f"(lateral residual "
               f"{float(np.linalg.norm(op[:2] - goal_xyz[:2])) * 1000:.1f}mm)", flush=True)
 
-        # ---- phase 2.5: trim at the slide height, before the lower ---- The slide lands a
-        # repeatable lateral miss, and trimming it AFTER the lower swings the object sideways
+        # phase 2.5: trim BEFORE the lower -- trimming after swings the object sideways
         # millimetres above the board, just before release.
         if os.environ.get("TRIM_BEFORE_LOWER", "1") == "1":
             self._arm_insert(obj, np.array([goal_xyz[0], goal_xyz[1], slide_z]),
-                             1.0, "trim-high", hold_fn)
+                             1.0, "trim-high", hold_fn, obj_idx=obj_idx)
+            if self._insert_refused:
+                print(">>> insert[trim-high]: refused -- the lower below drives the same "
+                      "corridor, so the insert ends here, grip not released", flush=True)
+                return None
+        # Boom vs the robot's own battery box, at the two poses that bind. Always prints.
+        self._body_clear("slide")
 
-        # ---- phase 3: LOWER onto the slot, columns only ----
-        q, h1, h2, a1, th = _pose()
+        # phase 3: LOWER onto the slot, columns only
         dz = float(goal_xyz[2]) - float(op[2])
-        q_t = q.copy()
-        q_t[ih1] = float(np.clip(h1 + dz, 0.0, COLUMN_MAX))
-        q_t[ih2] = float(np.clip(h2 + dz, 0.0, COLUMN_MAX))
-        q = self._ramp(q, q_t, 1.2, hold_fn)
+        with self._time_stage('lower'):
+            _mv = move_linear(self, np.array([0.0, 0.0, dz]), "base", secs=1.2,
+                              allow_contact_with=_grasp, fingers=None, tag="lower",
+                              on_step=self._contact_watch("lower"))
+        q = _mv.q_end if _mv else None
+        if q is None:
+            print(f">>> insert[lower]: {_mv.reason}", flush=True)
+            self._safety_abort = True
+            self._insert_refused = True
+            print(">>> insert[lower]: refused -- holding the last cleared pose, grip not released",
+                  flush=True)
+            return None
+        if self._drive_on():
+            # The lower can end with the object just ABOVE the board, at zero force, where friction
+            # cannot resist the open. Settle until it stops following the columns down.
+            _seated = False
+            for _kz in range(int(os.environ.get("PLACE_SEAT_MM", "6"))):
+                _z0s = float(np.asarray(obj.get_world_poses()[0][0], float)[2])
+                q_t = q.copy()
+                q_t[ih1] = float(np.clip(q[ih1] - 0.001, 0.0, COLUMN_MAX))
+                q_t[ih2] = float(np.clip(q[ih2] - 0.001, 0.0, COLUMN_MAX))
+                q = self._seat_step(q, q_t, 0.1, hold_fn)
+                if float(np.asarray(obj.get_world_poses()[0][0], float)[2]) > _z0s - 0.0005:
+                    _seated = True
+                    break
+            print(f">>> insert[lower]: board carries the object after {_kz} extra mm"
+                  if _seated else
+                  f">>> insert[lower]: object still following the columns after {_kz + 1} mm -- not seated",
+                  flush=True)
         op = np.asarray(obj.get_world_poses()[0][0], float)
         res = float(np.linalg.norm(goal_xyz - op))
         print(f">>> insert[lower]: object -> {np.round(op, 3).tolist()} target "
               f"{np.round(goal_xyz, 3).tolist()} residual {res * 1000:.1f}mm", flush=True)
+        # the binding pose: lower + settle, and the release is next
+        self._body_clear("seat")
         return q, res
 
-    def _arm_insert(self, obj, target, secs, tag, hold_fn, q_ref=None):
-        """Drive the OBJECT to `target` by moving the ARM, in joint space.
+    # Every link that MOVES under the servo's four joints, less the distal hand and the payload: those
+    # touch nothing during an insert, while checking a slipping payload refuses working placements.
+    SERVO_WATCH = ("Arm_1", "Arm_Left_1", "Arm_Right_1",
+                   "Bearing_Column_Left_1", "Bearing_Column_Right_1", "Rotation_Link_Left_1",
+                   "Contact_Cylinder_1_1", "Contact_Cylinder_1_2")
 
-        The arm slides from the carry anchor to the slot with the object still held, and only
-        releases once it is there -- the object is never moved independently. Without this stage
-        the baked trajectory stops `INSERT_STANDOFF` short and a glide carries the OBJECT the rest
-        of the way, which is why backing the base off to clear the rack makes the object fly to
-        the slot on its own -- one knob doing two jobs.
+    def _servo_blocked(self, q, obs, base):
+        """The proximal link colliding at `q`, None if clear, or False if the watch cannot judge.
 
-        MuJoCo closes the gap with Cartesian IK, which this arm cannot use: it is a closed
-        four-bar and `_jog_tick` diverges ("asked 71mm, hand moved 97151339mm"). The pick
-        descent already solves the same problem in JOINT space against the baked closure LUT, so
-        do that here: servo the columns (z, 1:1 by construction in `_grip_fk`) and a1/th
-        (horizontal, via a finite-difference Jacobian on the LUT). Every joint touched is one
-        the LUT covers, so the linkage stays on its closure manifold.
+        False is NOT "clear": a watch that failed to evaluate must refuse the insert, or an
+        exception silently converts the only check on this motion into a pass.
         """
+        try:
+            from morph.arm.api import MARGIN
+            m = self._arm_model()
+            q8 = np.asarray([q[self.idx[n]] for n in ArmModel.Q8], float)
+            return m.first_hit(q8, obs, MARGIN, None, base, links=self.SERVO_WATCH)
+        except Exception as e:                     # noqa: BLE001
+            print(f">>> insert: the servo watch could not be evaluated ({e}) -- refusing",
+                  flush=True)
+            return False
+
+    def _arm_insert(self, obj, target, secs, tag, hold_fn, q_ref=None, obj_idx=None):
+        """Drive the OBJECT to `target` by servoing the ARM in joint space, held throughout. Not a
+        Cartesian line: a line resolves this move's redundancy into the turret, which swings the
+        laterally offset object (FINDINGS). Columns for z; a1/th under an explicit yaw budget."""
+        if getattr(self, "_insert_refused", False):
+            # A refusal means a check rejected THIS corridor, and every later leg drives the same one.
+            # The NaN residual is what the servo refusal already returns.
+            print(f">>> insert[{tag}]: NOT run -- the insert already refused this corridor",
+                  flush=True)
+            return np.asarray(self.robot.get_joint_positions(), float).copy(), float("nan")
         ih1, ih2 = self.idx["ColumnLeftBearingJoint_1"], self.idx["ColumnRightBearingJoint_1"]
         ia1, ith = self.idx.get("ArmLeftJoint_1"), self.idx.get("BaseJoint_1")
         n = max(1, int(secs / self.dt))
         kp = 1.2
         tol = 0.008
-        # rad of turret yaw the insert may spend; the recorded place poses sit near -0.57 and a
-        # healthy correction is tens of milliradians, so anything approaching this is a runaway, not
-        # a correction
+        # rad of turret yaw the insert may spend; a real correction is tens of mrad, so anything
+        # near this is a runaway
         _TH_SPAN = 0.35
         _a1_lo = _a1_hi = (float(np.asarray(self.robot.get_joint_positions(), float)[self.idx["ArmLeftJoint_1"]])
                            if "ArmLeftJoint_1" in self.idx else 0.0)
@@ -283,14 +400,29 @@ class InsertStage:
         q_best = q.copy()
         th0 = float(q[ith]) if ith is not None else 0.0
         e0 = None
+        _sv_run = 0
+        # once: `_arm_obstacles` walks the whole stage
+        try:
+            # The carried object is DROPPED (a boom "hitting" its own payload is not a scene
+            # collision) -- looser than the ramps' "grasped" tag, deliberately; both pass live.
+            _sv_obs = self._arm_obstacles(
+                exclude_names=((f"pickup_obj_{obj_idx}",) if obj_idx is not None else ()))
+            _sv_base = self._arm_base_world()
+        except Exception as e:                     # noqa: BLE001
+            # Same rule the ramps get from `move_linear`: asked for a check and could not build
+            # it is a REFUSAL, not a silent pass.
+            print(f">>> insert[{tag}]: the servo watch could not be BUILT ({e}) -- refusing",
+                  flush=True)
+            self._fallback("servo-watch-unbuildable")
+            self._safety_abort = True
+            self._insert_refused = True
+            return np.asarray(self.robot.get_joint_positions(), float).copy(), float("nan")
         for k in range(n):
             op = np.asarray(obj.get_world_poses()[0][0], float)
             err = np.asarray(target, float) - op
             e = float(np.linalg.norm(err))
-            # Divergence guard. A closed-loop servo on a joint-space gradient can run away when the
-            # gradient stops describing the arm, and this one does -- driving the turret through
-            # more than a radian and putting the object hundreds of metres from the shelf, which
-            # nothing downstream can recover from.
+            # Divergence guard: when the joint-space gradient stops describing the arm the servo
+            # runs the turret through a radian and puts the object hundreds of metres away.
             if e0 is None:
                 e0 = e
             _run = (not np.all(np.isfinite(op))
@@ -315,20 +447,17 @@ class InsertStage:
             h1, h2 = float(q[ih1]), float(q[ih2])
             a1 = float(q[ia1]) if ia1 is not None else 0.0
             th = float(q[ith]) if ith is not None else 0.0
-            # The columns are two DOFs, not one. Their COMMON mode is height -- equal motion
-            # translates the whole four-bar 1:1 -- and their DIFFERENTIAL is boom tilt, which sets
-            # forward REACH.
+            # The columns are two DOFs; only their COMMON mode (height) is servoed here, so the
+            # boom tilt (their differential) is whatever the slide entered with.
             d_mean = float(np.clip(kp * err[2] * self.dt * 20.0, -0.004, 0.004))
-            d_diff = 0.0
             # xy: 2x2 Jacobian of the LUT grip position wrt (a1, th), solved least-squares
             da1 = dth = 0.0
             try:
                 p0 = self._grip_fk(h1, h2, a1, th)
                 ja = (self._grip_fk(h1, h2, a1 + eps, th) - p0)[:2] / eps
                 jt = (self._grip_fk(h1, h2, a1, th + eps) - p0)[:2] / eps
-                # Project, do not least-squares. A blind 2x2 solve dumps whatever a1 cannot supply
-                # into th, so once a1 saturates the servo SWINGS the object sideways chasing a
-                # radial error it can never close.
+                # Project, do not least-squares: a blind 2x2 solve dumps what a1 cannot supply
+                # into th and swings the object sideways once a1 saturates.
                 na, nt = float(np.linalg.norm(ja)), float(np.linalg.norm(jt))
                 if na > 1e-9:
                     da1 = float(np.clip(kp * float(err[:2] @ (ja / na)) / na
@@ -336,49 +465,40 @@ class InsertStage:
                 if nt > 1e-9:
                     dth = float(np.clip(kp * float(err[:2] @ (jt / nt)) / nt
                                         * self.dt * 20.0, -0.010, 0.010))
-                # Tilt picks up what a1 cannot, and only once a1 is against its stop -- while a1 has
-                # travel it is the cheaper actuator, because it does not disturb height. Off by
-                # default pending a stable formulation, not because tilt is wrong. The reach trade
-                # is real and worth having, especially for the high slot; what is wrong is THIS
-                # servo's way of spending it. Read off the LUT at a1 0.50:
-                #     dh   -0.100  0.000  +0.050  +0.110  +0.150
-                #   reach   0.638  0.809   0.746   0.620   0.565
-                #       z   1.256  0.835   0.570   0.395   0.350
-                # Reach PEAKS at dh 0 and falls off both ways, so tilting either direction loses
-                # reach; what negative tilt buys is HEIGHT. There is genuine reach headroom --
-                # straightening from the place bake gains ~190mm -- but it drags 440mm of height
-                # along with it, and the common-mode term is rate-clipped and cannot track a
-                # coupling that violent, so the object leaves the target while the gradient keeps
-                # asking for more. That is not fixable by gain tuning: the pair has to be SOLVED,
-                # picking the (dh, common-mode) that hits reach and height together, as
-                # `_solve_lowest` does for the descent.
-                _a1c = A1_MAX
-                if (os.environ.get("INSERT_TILT", "0") == "1"
-                        and a1 >= _a1c - 1e-3 and na > 1e-9):
-                    _resid = float(err[:2] @ (ja / na))    # radial error a1 must leave behind
-                    if _resid > 1e-4:                      # only to reach FURTHER, never nearer
-                        _d = 2e-3
-                        jd = (self._grip_fk(h1 - 0.5 * _d, h2 + 0.5 * _d, a1, th) - p0) / _d
-                        _rad = float(jd[:2] @ (ja / na))   # radial gain of straightening
-                        if abs(_rad) > 1e-6:
-                            d_diff = float(np.clip(kp * _resid / _rad * self.dt * 20.0,
-                                                   -0.004, 0.004))
-                            # straightening moves z too; cancel it in the common mode so the object
-                            # holds its height while the boom trades tilt for reach
-                            d_mean = float(np.clip(d_mean - 0.5 * d_diff * float(jd[2]),
-                                                   -0.006, 0.006))
             except Exception:
                 pass
-            q[ih1] = float(np.clip(h1 + d_mean - 0.5 * d_diff, 0.0, COLUMN_MAX))
-            q[ih2] = float(np.clip(h2 + d_mean + 0.5 * d_diff, 0.0, COLUMN_MAX))
+            q[ih1] = float(np.clip(h1 + d_mean, 0.0, COLUMN_MAX))
+            q[ih2] = float(np.clip(h2 + d_mean, 0.0, COLUMN_MAX))
             if ia1 is not None:
                 q[ia1] = float(np.clip(a1 + da1, 0.0, A1_MAX))
             if ith is not None:
-                # Clamp the turret. Every other joint here is bounded and th was not, so it was free
-                # to integrate a step's worth per sample for the whole servo -- radians over the
-                # lower phase, which is what it spent when it ran away.
+                # Clamp the turret: unbounded it integrates a step per sample into radians.
                 q[ith] = float(np.clip(th + dth, th0 - _TH_SPAN, th0 + _TH_SPAN))
+            _blk = self._servo_blocked(q, _sv_obs, _sv_base)
+            # the watch could not judge this step
+            if _blk is False:
+                _blk = "watch-unevaluable"
+            if _blk is not None:
+                print(f">>> insert[{tag}]: ABORTING at step {k + 1}/{n} -- {_blk} would collide at "
+                      f"the pose about to be commanded. Holding the last cleared pose; the object "
+                      f"stays held.", flush=True)
+                self._fallback("servo-proximal-blocked")
+                self._safety_abort = True
+                self._insert_refused = True
+                return q, float("nan")
             hold_fn(q)
+            # Distance-limited guarded move: sustained following error means every pose downstream
+            # is computed from a command the arm is not at, with the object held between two boards.
+            _sv_over = float(getattr(self, "_track_over", 0.0) or 0.0)
+            _sv_run = (_sv_run + 1) if _sv_over > 1.0 else 0
+            if _sv_run >= _SERVO_FOLLOW_STEPS:
+                print(f">>> insert[{tag}]: ABORTING at step {k + 1}/{n} -- a gated joint has been "
+                      f"past its tolerance for {_sv_run} consecutive steps (worst {_sv_over:.2f}x); "
+                      f"holding here, the object stays held.", flush=True)
+                self._fallback("servo-following-error")
+                self._safety_abort = True
+                self._insert_refused = True
+                return q, float("nan")
         op = np.asarray(obj.get_world_poses()[0][0], float)
         res = float(np.linalg.norm(np.asarray(target, float) - op))
         print(f">>>   insert[{tag}] arm: a1 {float(q[ia1]) if ia1 is not None else float('nan'):.3f} "

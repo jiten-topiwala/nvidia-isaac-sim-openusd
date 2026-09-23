@@ -1,0 +1,129 @@
+{
+ "problems": {
+  "free-space": {
+   "n": 100,
+   "ok_pct": 100.0,
+   "seed1_ok": true,
+   "p50_ms": 142.6,
+   "p95_ms": 152.305,
+   "max_ms": 163.0,
+   "lin_m": 0.0,
+   "rot_rad": 0.25,
+   "waypoints": 14.0,
+   "solve_s": 0.0060999999999999995,
+   "simplify_s": 0.0,
+   "densify_s": 0.010299999999999998,
+   "bad_goals": 0,
+   "tunnel": 0,
+   "selfcol": 0,
+   "densify_bad": 0,
+   "jobs": 1,
+   "solve_time": 3.0,
+   "env": {
+    "SELF_COLLIDE_PLAN": null,
+    "ARM_SIMPLIFY_MODE": null,
+    "ARM_SIMPLIFY_T": null
+   }
+  },
+  "reach": {
+   "n": 100,
+   "ok_pct": 100.0,
+   "seed1_ok": true,
+   "p50_ms": 1808.3,
+   "p95_ms": 1904.62,
+   "max_ms": 1972.0,
+   "lin_m": 1.2903,
+   "rot_rad": 1.4634000000000003,
+   "waypoints": 59.0,
+   "solve_s": 0.7317,
+   "simplify_s": 0.6013000000000001,
+   "densify_s": 0.311,
+   "bad_goals": 0,
+   "tunnel": 0,
+   "selfcol": 400,
+   "densify_bad": 0,
+   "jobs": 1,
+   "solve_time": 3.0,
+   "env": {
+    "SELF_COLLIDE_PLAN": null,
+    "ARM_SIMPLIFY_MODE": null,
+    "ARM_SIMPLIFY_T": null
+   }
+  },
+  "reach-nofingers": {
+   "n": 100,
+   "ok_pct": 0.0,
+   "seed1_ok": false,
+   "p50_ms": 266.95,
+   "p95_ms": 280.1,
+   "max_ms": 289.2,
+   "lin_m": null,
+   "rot_rad": null,
+   "waypoints": null,
+   "solve_s": null,
+   "simplify_s": null,
+   "densify_s": null,
+   "bad_goals": 0,
+   "tunnel": 0,
+   "selfcol": 0,
+   "densify_bad": 0,
+   "jobs": 1,
+   "solve_time": 3.0,
+   "env": {
+    "SELF_COLLIDE_PLAN": null,
+    "ARM_SIMPLIFY_MODE": null,
+    "ARM_SIMPLIFY_T": null
+   }
+  },
+  "retreat-remainder": {
+   "n": 100,
+   "ok_pct": 100.0,
+   "seed1_ok": true,
+   "p50_ms": 394.15,
+   "p95_ms": 422.96999999999997,
+   "max_ms": 437.7,
+   "lin_m": 0.15019999999999997,
+   "rot_rad": 0.0,
+   "waypoints": 9.0,
+   "solve_s": 0.10989999999999998,
+   "simplify_s": 0.07020000000000003,
+   "densify_s": 0.0475,
+   "bad_goals": 0,
+   "tunnel": 0,
+   "selfcol": 0,
+   "densify_bad": 0,
+   "jobs": 1,
+   "solve_time": 3.0,
+   "env": {
+    "SELF_COLLIDE_PLAN": null,
+    "ARM_SIMPLIFY_MODE": null,
+    "ARM_SIMPLIFY_T": null
+   }
+  },
+  "unreachable": {
+   "n": 100,
+   "ok_pct": 0.0,
+   "seed1_ok": false,
+   "p50_ms": 250.2,
+   "p95_ms": 260.6,
+   "max_ms": 269.2,
+   "lin_m": null,
+   "rot_rad": null,
+   "waypoints": null,
+   "solve_s": null,
+   "simplify_s": null,
+   "densify_s": null,
+   "bad_goals": 0,
+   "tunnel": 0,
+   "selfcol": 0,
+   "densify_bad": 0,
+   "jobs": 1,
+   "solve_time": 3.0,
+   "env": {
+    "SELF_COLLIDE_PLAN": null,
+    "ARM_SIMPLIFY_MODE": null,
+    "ARM_SIMPLIFY_T": null
+   }
+  }
+ }
+}

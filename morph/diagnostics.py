@@ -1,13 +1,17 @@
-"""Reporting only — measures and prints, never changes state.
-
-Extracted verbatim from play_isaac.py — the method bodies are unchanged.
-"""
+"""Reporting only — measures and prints, never changes state."""
 import json
 import math
 import os
 
 import numpy as np
-from morph.config import HERE, KNOWN
+from morph.config import HERE, KNOWN, CHASSIS_PLATE_X, CHASSIS_PLATE_Y
+
+MODEL_RESIDUAL_MM = 20.0        # chosen band, not a bisected floor: the mount is CONSTANT at
+                                # Fixed in the base frame at every configuration, so any nonzero
+                                # residual is model-vs-physics divergence, not motion.
+BEARING_COLUMN_BASE_XY = (0.150, 0.150)     # VERIFIED offline via ArmModel.fk: invariant over
+                                            # every joint configuration (BaseJoint_1's axis passes
+                                            # through the column; the column joint is prismatic-Z).
 
 
 class DiagnosticsMixin:
@@ -38,13 +42,10 @@ class DiagnosticsMixin:
               flush=True)
 
     def _arm_body_clearance(self, tag=""):
-        """Log each arm-chain link's signed clearance to the chassis plate (x +/-0.35, y +/-0.30 in
-        the BASE frame) plus the joint angles. Self-collision is OFF (enabling it OOMs), so PhysX
-        never reports arm<->body contact -- this GEOMETRIC readout is the only signal for the
-        arm entering the body. A NEGATIVE clearance means the link is inside the plate footprint,
-        i.e. overlapping the chassis. Called through the descent, so the tilt and pose at which a
-        link first goes negative can be read straight from the log and used to calibrate the limit.
-        """
+        """Log each arm-chain link's signed clearance (m) to the chassis plate (x +/-0.35,
+        y +/-0.30 in the BASE frame) plus the joint angles. Self-collision is OFF, so PhysX never
+        reports arm<->body contact and this geometric readout is the only signal; a NEGATIVE
+        clearance means the link is inside the plate footprint."""
         try:
             from isaacsim.core.prims import SingleXFormPrim
             from morph.usd_utils import find_path
@@ -67,12 +68,24 @@ class DiagnosticsMixin:
                 w = np.asarray(p.get_world_pose()[0], float)
                 dx, dy = w[0] - bx, w[1] - by
                 px, py = c * dx - s * dy, s * dx + c * dy         # world -> base frame
-                clr = max(abs(px) - self.CHASSIS_PLATE_X, abs(py) - self.CHASSIS_PLATE_Y)  # <0 = inside
+                clr = max(abs(px) - CHASSIS_PLATE_X, abs(py) - CHASSIS_PLATE_Y)  # <0 = inside
                 short = nm.replace("_Left_1", "").replace("_1", "")
                 parts.append(f"{short}: base({px:+.3f},{py:+.3f}) z{w[2]:.3f} clr{clr * 1000:+.0f}")
-                # MIN over the LOW, swinging links only (z < 0.35). The mount (Bearing_Column) and
-                # shoulder (Rotation_Link) sit ON the chassis, high up (z 0.46-0.70) -- their XY is
-                # always "inside" the footprint but they are ABOVE the plate, not colliding.
+                if short == "Bearing_Column":
+                    res = math.hypot(px - BEARING_COLUMN_BASE_XY[0], py - BEARING_COLUMN_BASE_XY[1])
+                    if res * 1000 > MODEL_RESIDUAL_MM:
+                        try:
+                            _rp = np.asarray(self.robot.get_world_pose()[0], float)
+                            _root = f"root world({_rp[0]:+.3f},{_rp[1]:+.3f})"
+                        except Exception:
+                            _root = "root world(?)"
+                        print(f">>> MODEL-PHYSICS DIVERGENCE[{tag}]: Bearing_Column base({px:+.3f},{py:+.3f}) "
+                              f"vs constant (+0.150,+0.150) -- residual {res * 1000:.0f}mm. "
+                              f"{_root} | ledger({bx:+.3f},{by:+.3f},{byaw:+.3f}) | "
+                              f"BC world({w[0]:+.3f},{w[1]:+.3f}). Root vs ledger separates a chassis "
+                              f"move from an articulation separation.", flush=True)
+                # MIN over the LOW, swinging links only: the mount and shoulder sit ON the chassis, high up,
+                # so their XY is always inside the footprint while they are ABOVE the plate, not colliding.
                 if w[2] < 0.35 and clr < worst[0]:
                     worst = (clr, short)
             print(f">>> arm-body[{tag}]: dh {h2 - h1:+.3f} (h1 {h1:.3f} h2 {h2:.3f}) a1 {a1:.3f} "
@@ -92,12 +105,9 @@ class DiagnosticsMixin:
 
     def _phase_report(self, tag, obj):
         """Per-phase ground truth: every finger joint against the RECORDED grasp reference, the
-        real collider-to-surface gap per finger, and where the object sits in the gripper frame.
-
-        Printing joint COMMAND against ACTUAL against REFERENCE is what distinguishes "the drive
-        never got there" from "contact pushed it back" from "something reset the target" — three
-        failures that look identical in the finger positions alone.
-        """
+        collider-to-surface gap per finger, and where the object sits in the gripper frame.
+        Joint COMMAND vs ACTUAL vs REFERENCE separates "the drive never got there" from "contact
+        pushed it back" from "something reset the target" -- identical in the positions alone."""
         try:
             _op, _oq = obj.get_world_poses()
             oc = np.asarray(_op[0], float)
@@ -160,10 +170,8 @@ class DiagnosticsMixin:
                   + (f" recorded {np.round(np.asarray(rec3_, float), 4).tolist()}"
                      f" drift {np.linalg.norm(objH_ - np.asarray(rec3_, float)) * 1000:.0f}mm"
                      if rec3_ is not None else ""), flush=True)
-            # Hand orientation. `objH(L3)` is a POSITION only, and the align nulls position only, so
-            # the same relation can be reached with the hand rotated differently every cycle --
-            # which matters because the fingers ARC: rotating the hand rotates the arc, and b/c flip
-            # from closing to opening across their j1 minimum.
+            # Hand orientation: `objH(L3)` is a POSITION only and the align nulls position only,
+            # so the same relation can be reached at any hand rotation -- and the fingers ARC.
             print(f">>>   [{tag}] handR x {np.round(hR_[:, 0], 3).tolist()} "
                   f"y {np.round(hR_[:, 1], 3).tolist()} z {np.round(hR_[:, 2], 3).tolist()}",
                   flush=True)
@@ -173,37 +181,44 @@ class DiagnosticsMixin:
         except Exception as e:
             print(f">>> [{tag}] phase report failed: {e}", flush=True)
 
+    def _force_closure_report(self, obj, tag=""):
+        """Measured force GEOMETRY of the grasp -- directions, not magnitudes. Returns the
+        thumb vs b+c opposition angle in degrees: a hold needs ~180, near 0 they shove the object
+        the same way. Vectors are contact-impulse sums (Ns) since the caller last cleared `_fVec`,
+        flipped so the force ON THE OBJECT points inward -- per-window, so opposition only."""
+        try:
+            oc = np.asarray(obj.get_world_poses()[0][0], float)
+            vecs = {}
+            for k, v in list(getattr(self, "_fVec", {}).items()):
+                v = np.asarray(v, float).copy()
+                p = getattr(self, "_fPos", {}).get(k)
+                if p is not None and float(v @ (oc - np.asarray(p, float))) < 0.0:
+                    v = -v
+                vecs[k] = v
+            va = vecs.get("a", np.zeros(3))
+            vbc = vecs.get("b", np.zeros(3)) + vecs.get("c", np.zeros(3))
+            vpalm = vecs.get("palm", np.zeros(3))
+            net = va + vbc + vpalm
+            na, nbc = float(np.linalg.norm(va)), float(np.linalg.norm(vbc))
+            opp = float("nan")
+            if na > 1e-6 and nbc > 1e-6:
+                opp = math.degrees(math.acos(float(np.clip((va @ vbc) / (na * nbc), -1.0, 1.0))))
+            print(f">>> force-closure[{tag}]: opposition {opp:.0f}deg (want ~180) | "
+                  f"thumb |{na:.2f}| vs b+c |{nbc:.2f}| Ns | palm |{float(np.linalg.norm(vpalm)):.2f}| | "
+                  f"net |{float(np.linalg.norm(net)):.2f}| Ns {np.round(net, 2).tolist()}", flush=True)
+            self._fVec, self._fPos = {}, {}
+            return opp
+        except Exception as _e_fc:
+            print(f">>> force-closure[{tag}]: unavailable ({_e_fc})", flush=True)
+            return None
+
     def _grasp_geometry_report(self, obj, tag=""):
         """Measure and print the grasp geometry: jaw opposition, mouth depth, knuckle throat and
-        per-finger pad heights. Returns the thumb->bc jaw axis (or None if it could not be read).
-
-        Pure measurement — it writes nothing and steps nothing. It used to live inside the legal
-        close, so turning that stage off (which every wrap config does) also turned off the only
-        numbers that say WHERE the hand is relative to the object. Diagnostics must not be a
-        side effect of a stage that mutates.
-        """
-        if os.environ.get("GRASP_DIAG", "1") != "1":
-            return None
-        # Pose dump, so a probe can be run at the pose the RUN actually reaches.
-        if os.environ.get("GRASP_DUMP_POSE", "0") == "1" and tag:
-            try:
-                _oc_dp = np.asarray(obj.get_world_poses()[0][0], float)
-                _bx_dp, _by_dp, _byaw_dp = self.base_ledger()
-                json.dump({"tag": tag,
-                           "joints": np.asarray(self.robot.get_joint_positions(),
-                                                float).tolist(),
-                           "names": list(self.names),
-                           "object_xyz": _oc_dp.tolist(),
-                           "base_xy_yaw": [_bx_dp, _by_dp, _byaw_dp]},
-                          open(os.path.join(HERE, f"usd/_pose_{tag}.json"), "w"))
-                print(f">>>   {_t}pose dumped -> usd/_pose_{tag}.json", flush=True)
-            except Exception as _e_dp:
-                print(f">>>   {_t}pose dump failed ({_e_dp})", flush=True)
-        jaw_axis = None
+        per-finger pad heights. Returns nothing -- the print IS the output. It steps nothing and
+        writes nothing but the `_k1` knuckle cache it fills on first use."""
         _t = f"[{tag}] " if tag else ""
-        # Do the pads actually OPPOSE? `pinch->obj` is a SCALAR and cannot answer that -- it is
-        # large both when all pads sit on one side and when the jaw is legitimately open with the
-        # thumb far and b/c near.
+        # Do the pads actually OPPOSE? `pinch->obj` is a SCALAR and cannot say: it is large both when every
+        # pad sits on one side and when the jaw is legitimately open.
         try:
             _oc_d = np.asarray(obj.get_world_poses()[0][0], float)
             _pd = {}
@@ -220,7 +235,6 @@ class DiagnosticsMixin:
                 _pr = {k: float((v[:2] - _oc_d[:2]) @ _ax) * 1000.0 for k, v in _pd.items()}
                 _opp = (_pr["a"] < 0.0) and (_pr["b"] > 0.0 or _pr["c"] > 0.0)
                 # How deep is the object in the mouth? The same projection, on the MOUTH axis.
-                # Negative means the pad is BEHIND the object centre, i.e.
                 try:
                     _pm = self._finger_world_pts("palm")
                     _mo3d = np.array([-_ax[1], _ax[0], 0.0])
@@ -228,9 +242,8 @@ class DiagnosticsMixin:
                     _pad_f = float(np.mean([np.max(self._finger_world_pts(_f_) @ _mo3d)
                                             for _f_ in "abc"]))
                     _mdep = _pad_f - _palm_f
-                    # A negative depth is not a small capacity, it is no cavity at all: the pads sit
-                    # BEHIND the palm face, so nothing can be enclosed at this pose and the palm is
-                    # necessarily the first surface the object meets.
+                    # A negative depth is not a small capacity, it is no cavity at all: the pads sit BEHIND
+                    # the palm face, so the palm is necessarily the first surface the object meets.
                     if _mdep <= 0:
                         print(f">>>   {_t}MOUTH GEOMETRY: palm face to pad line = "
                               f"{_mdep * 1000:+.1f}mm -> NO CAVITY at this pose (pads are BEHIND "
@@ -244,9 +257,8 @@ class DiagnosticsMixin:
                               f"{KNOWN['object_radius'] * 2000:.0f}mm)", flush=True)
                 except Exception as _e_mg:
                     print(f">>>   {_t}MOUTH GEOMETRY: failed ({_e_mg})", flush=True)
-                # Knuckle throat: the narrow point behind the pads. `finger_*_link_1` tops the
-                # contact ranking in EVERY run at EVERY object size, which is what a throat narrower
-                # than the pad opening looks like.
+                # Knuckle throat: the narrow point behind the pads, where `finger_*_link_1` spans
+                # the jaw. Narrower than the object diameter means the object cannot enter at all.
                 try:
                     from pxr import Usd as _U, UsdGeom as _UG, UsdPhysics as _UP
                     if not hasattr(self, "_k1"):
@@ -287,9 +299,8 @@ class DiagnosticsMixin:
                               flush=True)
                 except Exception as _e_k:
                     print(f">>>   {_t}KNUCKLE THROAT: failed ({_e_k})", flush=True)
-                # Per-finger z -- the dimension the horizontal numbers collapse away. They cannot
-                # tell "further out" from "riding ABOVE the object", so print the closest pad
-                # vertex's height against the object's band.
+                # Per-finger z, the dimension the horizontal numbers collapse away: they cannot tell further
+                # out from riding ABOVE the object. Print the closest pad vertex against the object's band.
                 try:
                     _top = _oc_d[2] + self.obj_half_h
                     _bot = _oc_d[2] - self.obj_half_h
@@ -315,9 +326,8 @@ class DiagnosticsMixin:
                           f"dz {float(_d_pin[2]) * 1000:+.1f}mm", flush=True)
                 except Exception as _e_pc:
                     print(f">>>   {_t}OBJECT vs PINCH: failed ({_e_pc})", flush=True)
-                # Log the axis, not just the depth. The depth is measured against `_ax`, and the
-                # hand rotates through the close, so a depth that moves run to run may be the AXIS
-                # moving rather than the seating.
+                # Log the axis, not just the depth: it is measured against `_ax` and the hand
+                # rotates, so a depth that moves may be the AXIS moving, not the seating.
                 _mo2 = np.array([-_ax[1], _ax[0]])
                 _pm = {k: float((v[:2] - _oc_d[:2]) @ _mo2) * 1000.0 for k, v in _pd.items()}
                 print(f">>>   {_t}MOUTH AXIS: [{_mo2[0]:+.4f} {_mo2[1]:+.4f}] "
@@ -325,7 +335,6 @@ class DiagnosticsMixin:
                 print(f">>>   {_t}MOUTH DEPTH: pad offsets along the mouth axis (mm, +ve = pad is "
                       f"in FRONT of the object centre): { {k: round(v, 1) for k, v in _pm.items()} }",
                       flush=True)
-                jaw_axis = _ax                    # kept: the legal close decomposes its squeeze drift on it
                 # The object's (du, dv): its offset from the pinch along the mouth and jaw axes, so
                 # a run can be compared against the reachable window directly.
                 try:
@@ -340,14 +349,11 @@ class DiagnosticsMixin:
                           f"(du -70..-130mm, |dv| <= 30mm)", flush=True)
                 except Exception as _e_dd:
                     print(f">>>   {_t}(du, dv) readout failed ({_e_dd})", flush=True)
-                # Which grip-frame axis is the mouth? hover-align can only offset along grip X
-                # (`standoff`) and grip Z (HOVER_STANDOFF_Z) -- gripper +Y is vertical here -- so
-                # name the axis before turning a knob.
+                # Which grip-frame axis is the mouth? hover-align can only offset along grip X and grip Z,
+                # so name the axis before turning a knob.
                 _gp_d, _gR_d = self._grip_frame()
-                # ...and in the HAND frame. This is the one to keep: the hand frame rotates with the
-                # wrist but NOT with the fingers, whereas a pad-derived axis moves as the fingers
-                # close -- so a "constant" grip-frame vector measured at close points elsewhere when
-                # the align, with the fingers wide, uses it.
+                # ...and in the HAND frame, the one to keep: it rotates with the wrist but NOT
+                # with the fingers, so unlike a pad-derived axis it means the same thing wide open.
                 _hp_d, _hR_d = self._hand_frame()
                 print(f">>>   {_t}mouth axis in HAND frame "
                       f"{np.round(_hR_d.T @ np.array([-_ax[1], _ax[0], 0.0]), 4).tolist()}  "
@@ -365,4 +371,13 @@ class DiagnosticsMixin:
                       flush=True)
         except Exception as _e_d:
             print(f">>> {_t}JAW GEOMETRY: measurement failed: {_e_d}", flush=True)
-        return jaw_axis
+
+
+def finger_vector_line(demo, q, tag):
+    """G2a measurement: the whole finger vector by joint name, in `_f_idx` order, measured against
+    the commanded channel. Delete with the diagnostic in G2b."""
+    cmd = (None if demo._finger_cmd is None
+           else np.asarray(demo._finger_cmd, float).tolist())
+    return f">>> {tag}: " + " | ".join(
+        f"{n} meas {float(q[i]):+.4f}" + ("" if cmd is None else f" cmd {cmd[k]:+.4f}")
+        for k, (n, i) in enumerate(zip(demo._f_names, demo._f_idx)))
